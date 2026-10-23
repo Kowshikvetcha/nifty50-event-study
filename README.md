@@ -1,22 +1,35 @@
 # Nifty 50 Event Study — Pre-Event Drift & Information Leakage
 
-A Python research pipeline that tests whether Nifty 50 stocks move abnormally **before** material corporate announcements, which would suggest information is leaking. It pulls timestamped filings from the BSE Corporate Announcements API and daily price/volume from Upstox API v2. Each filing is aligned to the first trading session that could react to it (the 15:30 IST rule). For each event, the pipeline measures pre-event drift, abnormal volume and post-event drift.
+A Python research pipeline that tests whether Nifty 50 stocks move **before** material corporate news is public. Such moves would point to informed or insider trading. It takes timestamped filings from BSE and NSE, and aligns each one to the first session that could react (the 15:30 IST rule). It then checks the days and minutes before the news for:
+
+- abnormal returns and volume;
+- futures and options positioning;
+- large deals;
+- (optionally) earlier press coverage.
+
+Events are compared against their own baselines and against random non-event days (placebo).
 
 ## Features
 
-- Maps NSE symbols to Upstox `instrument_key`s using the cached Upstox instrument master (`complete.csv.gz`).
-- Fetches every page of BSE filings for a scrip and keeps the broadcast timestamp (`DT_TM`) to the second.
-- Filters out routine compliance filings. It keeps results, dividends, board outcomes, M&A, order wins, restructuring/IPOs, strategic deals and exchange clarifications.
-- Assigns Day 0 under the 15:30 IST market-close rule and merges filings that share the same Day 0 into one event.
-- For each event, computes Nifty-50-adjusted CAR, the raw return, and the abnormal-volume ratio and z-score over [t-5, t-1] against a 30-day baseline, plus Day-0 AR and post-event drift over [t+1, t+5].
-- Labels outcomes (Continuation / Reversal "sell-the-news" / Rebound / Flat), flags possible leakage, and runs cross-sectional t-tests. The tests are run on all events and again on events whose windows don't overlap.
-- Optionally adds a pre-event stock-futures open-interest change from the NSE F&O bhavcopy (no token needed; Upstox expired contracts need a Plus plan).
+- **Universe:** a single stock or all of today's Nifty 50 (`--universe nifty50`), with every event pooled into one test. BSE scrip codes are resolved automatically by ISIN.
+- **Filings:** BSE announcements are classified by a keyword filter that drops routine compliance filings. Each filing's public time is the earlier of its BSE and NSE broadcasts, to the second.
+- **Directional tests:** the pre-window [t-5, t-1] Nifty-adjusted CAR is signed by the news direction and tested four ways: t-test, BMP standardised test, sign test, and a placebo bootstrap. Results are split into scheduled news (results, dividends, board outcomes) and unscheduled news, where leakage evidence matters most.
+- **Signals:**
+  - `fno`: futures OI change, option volume and call/put skew before the event (NSE bhavcopy, free).
+  - `deals`: bulk/block deals in the 30 sessions before (NSE).
+  - `intraday`: for filings released during market hours, the abnormal return and volume in the hour before the filing minute (Upstox 1-minute candles).
+  - `media` (opt-in, experimental): whether matching press coverage appeared on a day before the filing (Google News RSS).
+- **Report:** a self-contained HTML report with verdicts, the average signed CAR path, drift by event type, test tables and the strongest individual cases. Per-event, placebo and test CSVs are written alongside it.
 
 ## Prerequisites
 
-- Python 3.12. It was developed on 3.12.3; the code uses 3.10+ type syntax and 3.12 f-string quoting.
-- Internet access to `api.upstox.com`, `assets.upstox.com` and `api.bseindia.com`, plus `nsearchives.nseindia.com` for `--oi`.
-- An Upstox access token is **optional** and is not needed for `--oi` (NSE bhavcopy). Only `--oi-source upstox` needs one, plus a Plus plan.
+- Python 3.12. It was developed on 3.12.3.
+- Internet access to:
+  - `api.upstox.com` and `assets.upstox.com`;
+  - `api.bseindia.com`;
+  - `www.nseindia.com` and `nsearchives.nseindia.com`;
+  - `news.google.com` (only for `media`).
+- An Upstox access token for the `intraday` signal. Daily candles work without one. `--oi-source upstox` also needs the Upstox Plus plan.
 
 ## Installation
 
@@ -34,64 +47,85 @@ Credentials are read from `.env` in the project root by `config.py`. `.env` is g
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `UPSTOX_ACCESS_TOKEN` | No (only `--oi-source upstox`) | Sent as a Bearer token on Upstox requests |
-| `UPSTOX_API_KEY` | No | Loaded for future OAuth use; not currently used by any request |
-| `UPSTOX_API_SECRET` | No | Loaded for future OAuth use; not currently used by any request |
+| `UPSTOX_ACCESS_TOKEN` | For `intraday` and `--oi-source upstox` | Sent as a Bearer token on Upstox requests. Tokens expire daily (about 3:30 AM IST). Regenerate after a plan upgrade. |
+| `UPSTOX_API_KEY` / `UPSTOX_API_SECRET` | No | Used in the OAuth login flow to obtain a token; not used by any request |
 
-Study parameters (windows, baseline length, significance threshold, market-close cutoff, sample stocks) are constants in [config.py](config.py).
+Study parameters (windows, baselines, placebo size, signal settings) are constants in [config.py](config.py).
 
 ## Running
 
 ```bash
-.venv/Scripts/python main.py                               # Reliance, last 12 months
-.venv/Scripts/python main.py --symbol TMPV --scrip 500570  # Tata Motors
-.venv/Scripts/python main.py --months 24 --oi              # 24 months + FUTSTK OI (NSE bhavcopy OI)
+.venv/Scripts/python main.py                                  # RELIANCE, 12 months, per-event table
+.venv/Scripts/python main.py --symbol TMPV                    # Tata Motors (exercises the price-break skip)
+.venv/Scripts/python main.py --universe nifty50               # all Nifty 50, pooled tests + report
+.venv/Scripts/python main.py --universe TCS,INFY,HCLTECH      # any list of NSE symbols
+.venv/Scripts/python main.py --universe nifty50 --signals fno,deals,intraday,media
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--symbol` | `RELIANCE` | NSE trading symbol |
-| `--scrip` | from `config.SAMPLE_STOCKS` | BSE scrip code (required for symbols not in that map) |
+| `--symbol` | `RELIANCE` | Single-stock run (prints the per-event table) |
+| `--universe` | – | `nifty50` or comma-separated NSE symbols; pools all events |
+| `--scrip` | ISIN lookup | BSE scrip override for a single-stock run |
 | `--months` | `12` | Look-back period for announcements |
-| `--oi` | off | Add a pre-event futures open-interest change column |
-| `--oi-source` | `nse` | `nse` (free bhavcopy, Jul-2024 onward) or `upstox` (Plus plan) |
+| `--signals` | `fno,deals,intraday` | Any of `fno`, `deals`, `intraday`, `media`, or `none` |
+| `--oi` | off | Shorthand for adding `fno` |
+| `--oi-source` | `nse` | `nse` (bhavcopy, includes options) or `upstox` (expired near-month futures only) |
 
-On Windows consoles, set `PYTHONIOENCODING=utf-8` if a headline contains characters the console code page can't print.
+On Windows, prefix commands with `PYTHONIOENCODING=utf-8` when running from bash. The first Nifty 50 run downloads about 1,000 files and takes tens of minutes. Later runs read `data/cache/` and take about a minute.
 
-**Output**
-- A formatted event table and a cross-sectional summary are printed to stdout.
-- `output/event_study_<SYMBOL>_<YYYYMMDD>.csv` holds the per-event metrics.
-- `output/bse_filings_<SYMBOL>_<YYYYMMDD>.csv` holds every fetched filing with its `event_type` (empty = filtered out). Use it to audit the filter.
+**Output** (in `output/`, with the run date in each file name)
 
-### Reading the table
-
-| Column | Meaning |
+| File | Contents |
 |---|---|
-| Day 0 / Filed (IST) / Session | Reaction day, earliest filing timestamp, and how Day 0 was derived (Intraday, Post-close, Pre-open, Non-trading day) |
-| Pre Ret | Raw stock return over [t-5, t-1] |
-| Pre CAR / CAR z | Nifty-adjusted cumulative abnormal return over [t-5, t-1], and its z-score against baseline AR volatility |
-| Vol x / Vol z | Mean volume over [t-5, t-1] ÷ baseline mean, and its z-score |
-| D0 AR | Day-0 abnormal return (includes the announcement reaction) |
-| Post CAR | Nifty-adjusted CAR over [t+1, t+5]; blank if fewer than 5 sessions have elapsed |
-| Leak? | `YES` if \|CAR z\| ≥ 1.96 or Vol z ≥ 1.96 |
-| OI chg | (only with `--oi`) Change in total stock-futures open interest from t-6 to t-1, from the NSE F&O bhavcopy |
-| Ovl | `*` if another event's Day 0 falls within [t-5, t+5] |
+| `report_<SYMBOL\|panel>_<date>.html` | The report; open it in a browser |
+| `event_study_<SYMBOL>_<date>.csv` (single-stock run) or `panel_events_<date>.csv` (pooled run) | One row per event with every metric |
+| `placebo_*.csv` | The placebo days, measured the same way |
+| `tests_*.csv` | The hypothesis-test table |
+| `bse_filings_<SYMBOL>_<date>.csv` | Every fetched filing with its `event_type`, for auditing the filter |
+
+### Reading the results
+
+| Measure | Meaning |
+|---|---|
+| Signed pre CAR | Nifty-adjusted return over [t-5, t-1], multiplied by the sign of the news reaction. **> 0 means the stock moved the news' way before it was public.** |
+| t-test / BMP / Sign / Placebo p | Four tests of the same hypothesis. Placebo p compares against random non-event days for the same stocks. |
+| Vol z | Pre-window volume against the 30-session baseline |
+| Option vol z, Fut OI chg, Signed call skew z | F&O positioning before the event; p-values are against placebo days |
+| Intraday pre-AR z / pre-vol z | The hour before in-session filings, against the same clock window on the prior 20 sessions |
+| Placebo days row | The null: signed pre-CAR should be about 0 and Right way about 50% |
+
+The single-stock run also prints the original per-event table: Day 0, session, Pre/Post CAR, Vol z, D0 AR, outcome, the leakage flag (`|CAR z|` or `Vol z` ≥ 1.96) and the overlap marker.
+
+## Limitations
+
+- **No SEBI insider-trade (PIT) disclosures.** NSE's feed is incomplete, and the BSE endpoint isn't wired up yet.
+- **Media timing is day-level and unstable.** Free news feeds give no minute timestamps, and Google results vary between runs.
+- **Coverage and bias:**
+  - Prices are unadjusted; events near splits or demergers are skipped.
+  - The universe is today's Nifty 50 (survivorship bias).
+  - The event filter is keyword-based.
+  - Many tests are run, so about 1 in 20 p-values under 0.05 is expected by chance.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full methodology.
 
 ## Testing
 
-There is no automated test suite. Two manual checks were used during development: the 15:30 boundary cases in `event_study.assign_day0`, and auditing `output/bse_filings_*.csv`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#verifying-changes).
+There is no automated test suite. The checks used during development are listed under [docs/ARCHITECTURE.md → Verifying changes](docs/ARCHITECTURE.md#verifying-changes): the 15:30 boundary cases, the placebo sanity check, per-signal coverage lines, a visual check of the report, and the two sample stocks.
 
 ## Project structure
 
 ```
 config.py          credentials, endpoints, study constants
-upstox_client.py   instrument master, daily candles, expired-futures OI
-nse_client.py      stock-futures OI from NSE F&O bhavcopy (cached per day)
+upstox_client.py   instrument master, daily + 1-minute candles, expired-futures OI
 news_scraper.py    BSE announcements fetch + material-event classifier
-event_study.py     Day-0 alignment, window metrics, outcome labels, t-tests
-main.py            CLI orchestrator, table formatting, CSV export
-data/              instrument master + candle cache (generated, git-ignored)
-output/            per-run CSV results (generated, git-ignored)
+nse_client.py      Nifty 50 list, NSE announcements, F&O bhavcopy aggregates, bulk/block deals
+media_client.py    Google News RSS search (optional media signal)
+event_study.py     Day-0 alignment, metrics, signals, placebo, leakage tests (pure)
+report.py          HTML report (pure rendering)
+main.py            CLI orchestrator, terminal tables, CSV + report export
+data/              instrument master + API caches (generated, git-ignored)
+output/            per-run CSVs and HTML reports (generated, git-ignored)
 docs/              architecture and methodology
 ```
 

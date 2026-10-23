@@ -27,7 +27,13 @@ class UpstoxClient:
     # ------------------------------------------------------------------ helpers
     def _get(self, url: str, params: dict | None = None, retries: int = 3) -> dict:
         for attempt in range(retries):
-            resp = self.session.get(url, params=params, timeout=30)
+            try:
+                resp = self.session.get(url, params=params, timeout=30)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == retries - 1:  # long panel runs see the odd dropped connection
+                    raise
+                time.sleep(2 ** attempt)
+                continue
             if resp.status_code == 429:  # rate limited
                 time.sleep(2 ** attempt)
                 continue
@@ -76,6 +82,14 @@ class UpstoxClient:
             raise UpstoxError(f"Symbol {symbol!r} not found on {exchange}")
         return hit.iloc[0]["instrument_key"]
 
+    def get_bse_scrip(self, nse_key: str) -> int:
+        """BSE scrip code for an NSE_EQ instrument_key, matched on ISIN (keys are 'NSE_EQ|<ISIN>')."""
+        master = self.load_instrument_master()
+        hit = master[master["instrument_key"] == "BSE_EQ|" + nse_key.split("|", 1)[1]]
+        if hit.empty:
+            raise UpstoxError(f"No BSE listing for {nse_key}")
+        return int(hit.iloc[0]["exchange_token"])
+
     # --------------------------------------------------------- historical candles
     def get_daily_candles(self, instrument_key: str, from_date: date, to_date: date,
                           use_cache: bool = True) -> pd.DataFrame:
@@ -105,6 +119,37 @@ class UpstoxClient:
         df = df[~df.index.duplicated(keep="last")]
         df.to_csv(cache_file, index_label="date")
         return df
+
+    # ---------------------------------------------------------- intraday candles
+    def get_intraday_month(self, instrument_key: str, year: int, month: int) -> pd.DataFrame:
+        """1-minute bars for one calendar month (index = bar start, naive IST). Completed months are cached."""
+        first = date(year, month, 1)
+        last = (pd.Timestamp(first) + pd.offsets.MonthEnd(0)).date()
+        complete = last < date.today()
+        cache_file = config.CACHE_DIR / (
+            f"intraday_{instrument_key.replace('|', '_').replace(' ', '')}_{year}{month:02d}.csv.gz")
+        if complete and cache_file.exists():
+            return pd.read_csv(cache_file, index_col="ts", parse_dates=True)
+        url = config.UPSTOX_V3_CANDLE_URL.format(
+            key=quote(instrument_key, safe=""), unit="minutes", interval=1,
+            to_date=min(last, date.today()).isoformat(), from_date=first.isoformat())
+        candles = self._get(url).get("candles", [])
+        time.sleep(config.UPSTOX_REQUEST_PAUSE_SEC)
+        if not candles:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(candles, columns=_CANDLE_COLUMNS[: len(candles[0])])
+        df["ts"] = pd.to_datetime(df["timestamp"].str[:19])
+        df = df.drop(columns=["timestamp", "oi"], errors="ignore").set_index("ts").sort_index()
+        if complete:
+            df.to_csv(cache_file, index_label="ts")
+        return df
+
+    def get_intraday(self, instrument_key: str, days: list) -> pd.DataFrame:
+        """1-minute bars covering every calendar month that contains one of `days`."""
+        months = sorted({(d.year, d.month) for d in days})
+        frames = [self.get_intraday_month(instrument_key, y, m) for y, m in months]
+        frames = [f for f in frames if len(f)]
+        return pd.concat(frames).sort_index() if frames else pd.DataFrame()
 
     # ----------------------------------------------- expired FUTSTK (optional OI)
     def get_expired_expiries(self, underlying_key: str) -> list[str]:

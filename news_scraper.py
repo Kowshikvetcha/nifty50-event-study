@@ -59,8 +59,13 @@ class BSEScraper:
         self.session = requests.Session()
         self.session.headers.update(config.BSE_HEADERS)
 
-    def fetch_announcements(self, scrip_code: int, from_date: date, to_date: date) -> pd.DataFrame:
-        """All corporate announcements for a scrip in [from_date, to_date], every page."""
+    def fetch_announcements(self, scrip_code: int, from_date: date, to_date: date,
+                            use_cache: bool = True) -> pd.DataFrame:
+        """All corporate announcements for a scrip in [from_date, to_date], every page, cached."""
+        cache_file = config.CACHE_DIR / f"bse_{scrip_code}_{from_date}_{to_date}.csv"
+        if use_cache and cache_file.exists():
+            df = pd.read_csv(cache_file, parse_dates=["timestamp"], keep_default_na=False)
+            return df.astype({"critical": bool})
         rows, page, total = [], 1, None
         while True:
             params = {
@@ -68,7 +73,14 @@ class BSEScraper:
                 "strScrip": scrip_code,
                 "strPrevDate": from_date.strftime("%Y%m%d"), "strToDate": to_date.strftime("%Y%m%d"),
             }
-            resp = self.session.get(config.BSE_ANNOUNCEMENTS_URL, params=params, timeout=30)
+            for attempt in range(3):  # retry dropped connections; panel runs make hundreds of calls
+                try:
+                    resp = self.session.get(config.BSE_ANNOUNCEMENTS_URL, params=params, timeout=30)
+                    break
+                except (requests.ConnectionError, requests.Timeout):
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
             if resp.status_code != 200 or not resp.headers.get("Content-Type", "").startswith("application/json"):
                 raise RuntimeError(f"BSE API returned {resp.status_code}: {resp.text[:200]}")
             payload = resp.json()
@@ -82,7 +94,9 @@ class BSEScraper:
                 break
             page += 1
             time.sleep(config.BSE_REQUEST_PAUSE_SEC)
-        return self._normalise(rows)
+        df = self._normalise(rows)
+        df.to_csv(cache_file, index=False)
+        return df
 
     @staticmethod
     def _normalise(rows: list[dict]) -> pd.DataFrame:
