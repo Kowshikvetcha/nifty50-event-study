@@ -16,8 +16,8 @@ flowchart LR
   UP -- instrument master / candles --> CACHE[(data/)]
   UP -- stock + Nifty 50 daily OHLCV --> MAIN[main.py]
   BSE -- filings + event_type --> MAIN
-  NSE -- futures OI per session (optional, --oi) --> MAIN
-  NSE -- bhavcopy STF rows --> CACHE
+  NSE -- "futures OI per session (optional, --oi flag)" --> MAIN
+  NSE -- "bhavcopy STF rows" --> CACHE
   MAIN -- material filings, trading calendar --> ES
   ES -- results DataFrame + summary --> MAIN
   MAIN --> OUT[(output/*.csv + stdout table)]
