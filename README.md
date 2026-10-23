@@ -9,6 +9,8 @@ A Python research pipeline that tests whether Nifty 50 stocks move **before** ma
 
 Events are compared against their own baselines and against random non-event days (placebo).
 
+**New here?** Start with [docs/STUDY.md](docs/STUDY.md): the question, the method, the data sources and the findings so far, in plain language.
+
 ## Features
 
 - **Universe:** a single stock or all of today's Nifty 50 (`--universe nifty50`), with every event pooled into one test. BSE scrip codes are resolved automatically by ISIN.
@@ -19,7 +21,8 @@ Events are compared against their own baselines and against random non-event day
   - `deals`: bulk/block deals in the 30 sessions before (NSE).
   - `intraday`: for filings released during market hours, the abnormal return and volume in the hour before the filing minute (Upstox 1-minute candles).
   - `media` (opt-in, experimental): whether matching press coverage appeared on a day before the filing (Google News RSS).
-- **Report:** a self-contained HTML report with verdicts, the average signed CAR path, drift by event type, test tables and the strongest individual cases. Per-event, placebo and test CSVs are written alongside it.
+- **Report:** a self-contained HTML report. It contains verdicts for unscheduled news, the average signed CAR path, drift by event type, the test tables, the strongest individual price moves, and a ranked list of directional option-flow **leads**. Per-event, placebo, test and lead CSVs are written alongside it.
+- **Drill-down** (`drilldown.py`): for each lead, the day-by-day option flow, the actual contracts bought with their Day-0 premium change (did the buyers profit?), the filings around the event and earlier press coverage.
 
 ## Prerequisites
 
@@ -60,6 +63,8 @@ Study parameters (windows, baselines, placebo size, signal settings) are constan
 .venv/Scripts/python main.py --universe nifty50               # all Nifty 50, pooled tests + report
 .venv/Scripts/python main.py --universe TCS,INFY,HCLTECH      # any list of NSE symbols
 .venv/Scripts/python main.py --universe nifty50 --signals fno,deals,intraday,media
+.venv/Scripts/python drilldown.py                            # drill into the top 8 option-flow leads
+.venv/Scripts/python drilldown.py --symbol ONGC --day0 2026-01-06   # any single event
 ```
 
 | Flag | Default | Meaning |
@@ -82,6 +87,7 @@ On Windows, prefix commands with `PYTHONIOENCODING=utf-8` when running from bash
 | `event_study_<SYMBOL>_<date>.csv` (single-stock run) or `panel_events_<date>.csv` (pooled run) | One row per event with every metric |
 | `placebo_*.csv` | The placebo days, measured the same way |
 | `tests_*.csv` | The hypothesis-test table |
+| `drilldown_<date>.html`, `drilldown_contracts_<date>.csv` | `drilldown.py` output: for each lead, the day-by-day option flow, the contracts traded with their Day-0 premium change, filings and earlier press |
 | `otm_leads_*.csv` | Unscheduled events with significant short-dated OTM option volume on the side that profits from the news, ranked; leads to investigate, not findings |
 | `bse_filings_<SYMBOL>_<date>.csv` | Every fetched filing with its `event_type`, for auditing the filter |
 
@@ -92,14 +98,20 @@ On Windows, prefix commands with `PYTHONIOENCODING=utf-8` when running from bash
 | Signed pre CAR | Nifty-adjusted return over [t-5, t-1], multiplied by the sign of the news reaction. **> 0 means the stock moved the news' way before it was public.** |
 | t-test / BMP / Sign / Placebo p | Four tests of the same hypothesis. Placebo p compares against random non-event days for the same stocks. |
 | Vol z | Pre-window volume against the 30-session baseline |
-| Option vol z, Fut OI chg, Signed call skew z | F&O positioning before the event; p-values are against placebo days |
+| Option vol z | Stock-option volume before the event against its baseline |
+| OTM news-side / wrong-side vol z | Short-dated out-of-the-money option volume on the side that profits from the news (calls before good news, puts before bad) vs the opposite side. News side > wrong side is the informed-trading footprint. |
+| Option OI chg, Fut OI chg, Signed call-put OI tilt | Open-interest build-up from t-6 to t-1, ignoring the drop when a monthly series expires |
+| Signed call vol skew z | Call share of option volume, signed by the news direction |
+| *(positioning p-values)* | All against placebo days, not against zero |
 | Intraday pre-AR z / pre-vol z | The hour before in-session filings, against the same clock window on the prior 20 sessions |
 | Placebo days row | The null: signed pre-CAR should be about 0 and Right way about 50% |
+| Verdict tiles (report) | Unscheduled news only. Scheduled results are pre-announced, so positioning before them is expected. |
 
 The single-stock run also prints the original per-event table: Day 0, session, Pre/Post CAR, Vol z, D0 AR, outcome, the leakage flag (`|CAR z|` or `Vol z` ≥ 1.96) and the overlap marker.
 
 ## Limitations
 
+- **Leads are not findings.** On the first 8 leads, every trade that profited had a public explanation (a broker upgrade, macro news, a same-day media report).
 - **No SEBI insider-trade (PIT) disclosures.** NSE's feed is incomplete, and the BSE endpoint isn't wired up yet.
 - **Media timing is day-level and unstable.** Free news feeds give no minute timestamps, and Google results vary between runs.
 - **Coverage and bias:**
@@ -123,14 +135,16 @@ news_scraper.py    BSE announcements fetch + material-event classifier
 nse_client.py      Nifty 50 list, NSE announcements, F&O bhavcopy aggregates, bulk/block deals
 media_client.py    Google News RSS search (optional media signal)
 event_study.py     Day-0 alignment, metrics, signals, placebo, leakage tests (pure)
-report.py          HTML report (pure rendering)
+report.py          HTML report and drill-down page (pure rendering)
+drilldown.py       per-event drill-down CLI for option-flow leads
 main.py            CLI orchestrator, terminal tables, CSV + report export
 data/              instrument master + API caches (generated, git-ignored)
 output/            per-run CSVs and HTML reports (generated, git-ignored)
-docs/              architecture and methodology
+docs/              STUDY.md (plain-language overview), ARCHITECTURE.md (design)
 ```
 
 ## Further documentation
 
+- [docs/STUDY.md](docs/STUDY.md): what the study is trying to find, how it works, the data sources, and the findings so far.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): data flow, methodology, a file-by-file reference and known limitations.
 - [CLAUDE.md](CLAUDE.md): working notes for AI-assisted development in this repo.

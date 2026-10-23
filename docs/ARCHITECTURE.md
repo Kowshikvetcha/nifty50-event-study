@@ -9,11 +9,11 @@ This is a flat Python script pipeline with no framework or package. Four data-ac
 - `nse_client.py`: NSE filings, F&O activity, deals and constituents
 - `media_client.py`: press coverage
 
-`event_study.py` is pure computation: it turns those frames into per-event metrics and tests. `report.py` renders the HTML report. `main.py` runs one stock or a pooled universe (e.g. all Nifty 50). `config.py` is the single source of constants and credentials, and every other module imports it.
+`event_study.py` is pure computation: it turns those frames into per-event metrics, tests and the leads ranking. `report.py` renders the HTML report and the drill-down page. `main.py` runs one stock or a pooled universe (e.g. all Nifty 50). `drilldown.py` investigates the option-flow leads. `config.py` is the single source of constants and credentials, and every other module imports it.
 
 **The question:** do prices, volume and positioning move in the direction of material news *before* it is public?
 
-**How it's tested:** each event's pre-window is compared against its own baseline and against random non-event days for the same stocks (placebo).
+**How it's tested:** each event's pre-window is compared against its own baseline and against random non-event days for the same stocks (placebo). For a plain-language overview with data sources and findings, see [STUDY.md](STUDY.md).
 
 ## How it fits together
 
@@ -38,6 +38,8 @@ flowchart LR
   MAIN --> REP[report.py]
   MAIN --> OUT[(output/*.csv)]
   REP --> HTML[(output/report_*.html)]
+  OUT -- "otm_leads_*.csv" --> DD[drilldown.py]
+  DD --> REP
 ```
 
 A run of `python main.py --universe nifty50` works like this:
@@ -59,7 +61,9 @@ A run of `python main.py --universe nifty50` works like this:
    - The terminal tables (single-stock runs also print the per-event table).
    - `output/event_study_<SYM>_*.csv`, or `panel_events_*.csv` for pooled runs.
    - `placebo_*.csv`, `tests_*.csv` and the `bse_filings_*` audit CSVs.
+   - `otm_leads_*.csv` (from `rank_directional_otm`).
    - `report_*.html`.
+6. **Drill-down** (separate command). `drilldown.py` reads the latest leads CSV and fetches per-contract option data, prices, filings and press for each lead. It writes `drilldown_*.html` and `drilldown_contracts_*.csv`.
 
 ## Methodology
 
@@ -147,6 +151,8 @@ Per group, `leakage_tests` reports:
 - **The expiry cycle matters for OI.** Option OI builds through each monthly cycle; on placebo days the median 5-day change runs from −4% just after expiry to +32% 6–10 sessions in. Events and placebo days are spread across the cycle similarly, so the placebo comparison is fair. When reading a group's OI number, still check it against the cycle: scheduled events stayed +13% above placebo when matched on sessions-since-expiry.
 - **Upstox alternative:** `--oi-source upstox` uses expired near-month futures (Plus plan). It covers futures only and stops at the last expiry. Prefer NSE.
 
+**Drill-down (`option_flow_by_day`, `top_contracts`, `drilldown.py`).** For each lead it shows the news-side vs wrong-side OTM volume from t-10 to t+1, and the news-side contracts with the most pre-window volume against their own baseline. It also shows each contract's premium at t-1 vs Day 0 (did the buyers profit from the news?), plus filings and press. On the first 8 leads every winning trade had a public explanation (a broker upgrade, Venezuela news, a same-day media report). Treat leads as a screen, not as evidence.
+
 **Leads list (`rank_directional_otm`).** Unscheduled, non-overlapping events are kept when `news_side_otm_vol_z ≥ 1.96` and the news side exceeds the wrong side. They are ranked by the gap and written to `output/otm_leads_*.csv` and the report. Many leads are "Clarification sought" events, where the media report came before the filing; check the press timeline before treating a lead as insider trading.
 
 ### Bulk and block deals (`measure_deals`, signal `deals`)
@@ -215,6 +221,7 @@ Because direction comes from the reaction, every path rises after Day 0 by const
 | `nse_deals_*` | bulk and block deals | symbol and range |
 | `nifty50_<date>` | constituents | day |
 | `gnews_*` | Google News results | company and range |
+| `strikes/<SYM>_<date>.csv` | per-contract option rows (drill-down only) | symbol and session |
 
 Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggregation and can be deleted.
 
@@ -229,6 +236,7 @@ Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggre
 | `media_client.py` | `MediaClient.search` (Google News RSS, cached) and `company_query` (strips the "Ltd." suffix). Raises `MediaError`. |
 | `event_study.py` | Pure computation with no I/O apart from skip notices:<br>• **timing and events:** `assign_day0`, `earliest_exchange_time`, `build_events`, `placebo_events`;<br>• **metrics:** `measure_event`, `measure_fno`, `measure_deals`, `measure_intraday`, `media_lead` / `generic_words`, `add_direction_metrics`;<br>• **orchestration and tests:** `run_event_study`, `summarise` (single-stock summary), `leakage_tests`. |
 | `report.py` | `build(results, placebo, tests, meta)` returns the HTML report. |
+| `drilldown.py` | Drill-down CLI. For the leads in the latest `otm_leads_*.csv` (or `--symbol/--day0`) it fetches per-contract options (`NSEClient.get_option_strikes`), daily prices, BSE filings for ±10 days and Google News for the 10 days before. It renders `report.build_drilldown` to `output/drilldown_<date>.html` and writes `drilldown_contracts_<date>.csv`. |
 | `main.py` | The CLI: `resolve_universe`, `study_stock`, `tests_table`, terminal formatting, and the CSV and report writes. |
 
 ## Key design decisions / gotchas
@@ -268,5 +276,6 @@ There is no test suite. After changing:
 - **Filter rules:** re-run `main.py` and diff the `event_type` column of `output/bse_filings_<SYMBOL>_*.csv`.
 - **Methodology:** check the placebo row first. Signed pre-CAR should be about 0, and Right way about 50%.
 - **Signals:** run a single stock. Each source prints a coverage line (`F&O (nse): N sessions`, `Bulk/block deals: N rows`, `Intraday: N one-minute bars ...`, `NSE filings: ...`); confirm the numbers look sensible.
+- **Drill-down:** run `drilldown.py --top 1` and check that the day table's news-side OTM volume matches the lead's pre-window spike, and that the contract premiums are plausible against the bhavcopy.
 - **Report:** open `output/report_*.html` in light and dark mode. Check that no bar or line runs past its axis and that labels don't collide.
 - **Anything else:** run `RELIANCE` and `TMPV`. Tata Motors exercises the price-break skip.

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Research pipeline testing whether Nifty 50 stocks move before material news is public (pre-event drift / information leakage). It uses BSE+NSE filings (timestamps), Upstox daily and 1-minute candles, NSE F&O bhavcopy and deals, with placebo days as the null. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Research pipeline testing whether Nifty 50 stocks move before material news is public (pre-event drift / information leakage). It uses BSE+NSE filings (timestamps), Upstox daily and 1-minute candles, NSE F&O bhavcopy and deals, with placebo days as the null. Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Plain-language goal, sources and findings: [docs/STUDY.md](docs/STUDY.md); update its findings section when results change materially.
 
 ## Commands
 
@@ -10,6 +10,7 @@ Research pipeline testing whether Nifty 50 stocks move before material news is p
 .venv/Scripts/python main.py --symbol TMPV            # Tata Motors (exercises price-break skip)
 .venv/Scripts/python main.py --universe nifty50       # pooled panel; cold cache = tens of minutes
 .venv/Scripts/python main.py --signals none           # price/volume only, fastest
+.venv/Scripts/python drilldown.py                     # per-event drill-down of the latest option-flow leads
 ```
 
 - Windows dev box: always use `.venv/Scripts/python`, and prefix with `PYTHONIOENCODING=utf-8` when running from bash.
@@ -18,7 +19,7 @@ Research pipeline testing whether Nifty 50 stocks move before material news is p
 ## Layout
 
 Flat modules, with `config.py` imported by everything:
-`upstox_client.py` (daily + 1-min prices) · `news_scraper.py` (BSE filings + classifier) · `nse_client.py` (Nifty 50 list, NSE filings, F&O bhavcopy, deals) · `media_client.py` (Google News) · `event_study.py` (pure computation + tests) · `report.py` (HTML rendering) · `main.py` (CLI).
+`upstox_client.py` (daily + 1-min prices) · `news_scraper.py` (BSE filings + classifier) · `nse_client.py` (Nifty 50 list, NSE filings, F&O bhavcopy, deals) · `media_client.py` (Google News) · `event_study.py` (pure computation + tests) · `report.py` (HTML rendering) · `drilldown.py` (lead drill-down CLI) · `main.py` (CLI).
 
 ## Conventions
 

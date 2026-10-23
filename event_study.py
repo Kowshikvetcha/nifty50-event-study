@@ -85,7 +85,7 @@ _STOPWORDS = set(
     "said says will report reports group business market markets price today year crore".split())
 
 
-def _keywords(text: str) -> set[str]:
+def keywords(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _STOPWORDS}
 
 
@@ -94,7 +94,7 @@ def generic_words(titles: pd.Series) -> set[str]:
     Reliance's subsidiaries): they match unrelated stories, so they don't count towards a match."""
     if titles.empty:
         return set()
-    df = pd.Series([w for t in titles.drop_duplicates() for w in _keywords(t)]).value_counts()
+    df = pd.Series([w for t in titles.drop_duplicates() for w in keywords(t)]).value_counts()
     return set(df[df / titles.nunique() > config.MEDIA_MAX_DOC_FREQ].index)
 
 
@@ -106,10 +106,10 @@ def media_lead(articles: pd.DataFrame, company: str, headline: str, filing_ts: p
     distinctive headline keywords (company-name and generic words excluded). Dates only: same-day coverage
     cannot be ordered against the filing.
     """
-    keys = _keywords(headline) - _keywords(company) - generic
+    keys = keywords(headline) - keywords(company) - generic
     if not keys or articles.empty:
         return {"media_prior_n": 0, "media_lead_days": 0, "media_prior": False}
-    hits = articles[articles["title"].map(lambda t: len(_keywords(t) & keys) >= config.MEDIA_MIN_KEYWORDS)]
+    hits = articles[articles["title"].map(lambda t: len(keywords(t) & keys) >= config.MEDIA_MIN_KEYWORDS)]
     prior = hits[hits["date"] < filing_ts.normalize()]
     lead = (filing_ts.normalize() - prior["date"].min()).days if len(prior) else 0
     return {"media_prior_n": len(prior), "media_lead_days": lead, "media_prior": len(prior) > 0}
@@ -389,6 +389,82 @@ def rank_directional_otm(results: pd.DataFrame) -> pd.DataFrame:
     u["otm_side_gap"] = u["news_side_otm_vol_z"] - u["wrong_side_otm_vol_z"]
     u = u[(u["news_side_otm_vol_z"] >= config.SIGNIFICANCE_Z) & (u["otm_side_gap"] > 0)]
     return u.sort_values("otm_side_gap", ascending=False).reset_index(drop=True)
+
+
+def _flag_contracts(strikes: pd.DataFrame) -> pd.DataFrame:
+    """Add moneyness, otm and front (nearest live expiry that day) to per-contract option rows."""
+    s = strikes.copy()
+    s["moneyness"] = s["strike"] / s["underlying"] - 1
+    m = config.OTM_MIN_MONEYNESS
+    s["otm"] = ((s["side"] == "CE") & (s["moneyness"] >= m)) | ((s["side"] == "PE") & (s["moneyness"] <= -m))
+    s["front"] = s["expiry"] == s.groupby("date")["expiry"].transform("min")
+    return s
+
+
+def option_flow_by_day(strikes: pd.DataFrame, px: pd.DataFrame, day0: pd.Timestamp, direction: float,
+                       lo: int = -10, hi: int = 1) -> pd.DataFrame:
+    """Drill-down day table t+lo..t+hi: stock AR and volume, front-month OTM volume on the news and wrong
+    side, and total call / put OI. direction > 0 makes calls the news side."""
+    s = _flag_contracts(strikes)
+    news, wrong = ("CE", "PE") if direction > 0 else ("PE", "CE")
+    fo = s[s["otm"] & s["front"]].pivot_table(index="date", columns="side", values="vol", aggfunc="sum")
+    oi = s.pivot_table(index="date", columns="side", values="oi", aggfunc="sum")
+    i = px.index.get_loc(day0)
+    base_vol = px["volume"].iloc[max(i - 35, 0):i - 5].mean()
+    rows = []
+    for k in range(lo, hi + 1):
+        if not 0 <= i + k < len(px):
+            continue
+        d = px.index[i + k]
+        rows.append({"k": k, "date": d, "ar": px["ar"].iloc[i + k], "vol_x": px["volume"].iloc[i + k] / base_vol,
+                     "news_otm_vol": fo[news].get(d, np.nan) if news in fo else np.nan,
+                     "wrong_otm_vol": fo[wrong].get(d, np.nan) if wrong in fo else np.nan,
+                     "call_oi": oi["CE"].get(d, np.nan) if "CE" in oi else np.nan,
+                     "put_oi": oi["PE"].get(d, np.nan) if "PE" in oi else np.nan})
+    return pd.DataFrame(rows)
+
+
+def top_contracts(strikes: pd.DataFrame, sessions: pd.DatetimeIndex, day0: pd.Timestamp, direction: float,
+                  n: int = 8) -> pd.DataFrame:
+    """News-side OTM contracts with the most pre-window volume, against their own baseline.
+
+    For each (expiry, strike) on the news side that was OTM at t-1: pre-window [t-5, t-1] volume and its
+    ratio to the contract's mean daily volume over [t-35, t-6] (missing days count as zero), OI change
+    t-6 -> t-1, and the premium at t-1 vs Day 0 close (what a pre-news buyer would have made).
+    """
+    side = "CE" if direction > 0 else "PE"
+    s = _flag_contracts(strikes)
+    s = s[s["side"] == side]
+    i = sessions.get_loc(day0)
+    pre_lo, pre_hi = config.PRE_WINDOW
+    t1, t6 = sessions[i + pre_hi], sessions[i + pre_lo - 1]
+    base_days = sessions[max(i + pre_lo - config.BASELINE_DAYS, 0):i + pre_lo]
+    pre_days = sessions[i + pre_lo:i + pre_hi + 1]
+    at_t1 = s[(s["date"] == t1) & s["otm"]].set_index(["expiry", "strike"])
+    if at_t1.empty:
+        return pd.DataFrame()
+    key = ["expiry", "strike"]
+    pre = s[s["date"].isin(pre_days)].groupby(key)["vol"].sum()
+    base = s[s["date"].isin(base_days)].groupby(key)["vol"].sum() / max(len(base_days), 1)
+    by_day = s.set_index(["date", *key])
+
+    def val(d, k, col):
+        return by_day[col].get((d, *k), np.nan)
+
+    rows = []
+    for k, r in at_t1.iterrows():
+        pv = pre.get(k, 0)
+        if pv <= 0:
+            continue
+        b = base.get(k, 0)
+        p1, p0 = val(t1, k, "close"), val(day0, k, "close")
+        rows.append({"expiry": k[0], "strike": k[1], "moneyness_t1": r["moneyness"], "pre_vol": pv,
+                     "base_daily_vol": b, "pre_vs_base": (pv / len(pre_days)) / b if b > 0 else np.inf,
+                     "oi_t6": val(t6, k, "oi"), "oi_t1": val(t1, k, "oi"),
+                     "premium_t1": p1, "premium_day0": p0,
+                     "premium_chg": p0 / p1 - 1 if p1 and p1 > 0 and not pd.isna(p0) else np.nan})
+    out = pd.DataFrame(rows)
+    return out.sort_values("pre_vol", ascending=False).head(n).reset_index(drop=True) if len(out) else out
 
 
 def placebo_events(trading_days: pd.DatetimeIndex, event_day0s: list, n: int,

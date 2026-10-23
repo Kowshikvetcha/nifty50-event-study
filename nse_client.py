@@ -18,6 +18,7 @@ class NSEClient:
         self.session = requests.Session()
         self.session.headers.update(config.NSE_HEADERS)
         self._fo_mem: dict[date, pd.DataFrame | None] = {}
+        self._raw_mem: dict[date, pd.DataFrame] = {}
         self._api_ready = False
 
     def _get(self, url: str, params: dict | None = None, timeout: int = 60, retries: int = 3) -> requests.Response:
@@ -115,6 +116,48 @@ class NSEClient:
         df.to_csv(cache_file, index=False)
         return df
 
+    def _bhavcopy(self, day: date) -> pd.DataFrame | None:
+        """The full F&O bhavcopy for one session (not cached on disk: ~1 MB zipped). None on 404."""
+        if day in self._raw_mem:
+            return self._raw_mem[day]
+        resp = self._get(config.NSE_FO_BHAVCOPY_URL.format(yyyymmdd=f"{day:%Y%m%d}"))
+        time.sleep(config.NSE_REQUEST_PAUSE_SEC)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise NSEError(f"{resp.status_code} from NSE bhavcopy for {day}")
+        df = pd.read_csv(io.BytesIO(resp.content), compression="zip")
+        if len(self._raw_mem) >= 5:  # a drill-down asks several symbols for the same few days
+            self._raw_mem.pop(next(iter(self._raw_mem)))
+        self._raw_mem[day] = df
+        return df
+
+    def get_option_strikes(self, symbol: str, sessions: pd.DatetimeIndex) -> pd.DataFrame:
+        """Per-contract stock-option rows (expiry, strike, side, close, oi, vol, underlying) for one symbol.
+
+        Used by the drill-down only; cached per symbol and day under data/cache/strikes/.
+        """
+        folder = config.CACHE_DIR / "strikes"
+        folder.mkdir(exist_ok=True)
+        frames = []
+        for ts in sessions:
+            cache_file = folder / f"{symbol.replace('&', '_')}_{ts:%Y%m%d}.csv"
+            if cache_file.exists():
+                df = pd.read_csv(cache_file, parse_dates=["expiry"])
+            else:
+                raw = self._bhavcopy(ts.date())
+                if raw is None:
+                    continue
+                r = raw[(raw["FinInstrmTp"] == "STO") & (raw["TckrSymb"] == symbol.upper())]
+                df = pd.DataFrame({"expiry": pd.to_datetime(r["XpryDt"]), "strike": r["StrkPric"],
+                                   "side": r["OptnTp"], "close": r["ClsPric"], "oi": r["OpnIntrst"],
+                                   "vol": r["TtlTradgVol"], "underlying": r["UndrlygPric"]})
+                df.to_csv(cache_file, index=False)
+            frames.append(df.assign(date=ts))
+        if not frames:
+            raise NSEError(f"No NSE option data for {symbol} in the requested sessions")
+        return pd.concat(frames, ignore_index=True)
+
     def _fo_day(self, day: date) -> pd.DataFrame | None:
         """Stock F&O activity for one session, aggregated per (symbol, kind, expiry, otm). Cached per day;
         None if there is no file (holiday / not out yet).
@@ -129,14 +172,10 @@ class NSEClient:
         if cache_file.exists():
             agg = pd.read_csv(cache_file, parse_dates=["expiry"]).set_index("symbol")
         else:
-            resp = self._get(config.NSE_FO_BHAVCOPY_URL.format(yyyymmdd=f"{day:%Y%m%d}"))
-            time.sleep(config.NSE_REQUEST_PAUSE_SEC)
-            if resp.status_code == 404:
+            df = self._bhavcopy(day)
+            if df is None:
                 self._fo_mem[day] = None
                 return None
-            if resp.status_code != 200:
-                raise NSEError(f"{resp.status_code} from NSE bhavcopy for {day}")
-            df = pd.read_csv(io.BytesIO(resp.content), compression="zip")
             df = df[df["FinInstrmTp"].isin(["STF", "STO"])]
             kind = df["OptnTp"].where(df["FinInstrmTp"] == "STO", "FUT")
             m = config.OTM_MIN_MONEYNESS

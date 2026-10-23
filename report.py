@@ -11,6 +11,68 @@ from scipy import stats
 
 import config
 
+_CSS = """:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
+  --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-0: #898781;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-0: #898781;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+  --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926; --series-0: #898781;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 40px 0 8px; }
+h3 { font-size: 16px; margin: 24px 0 6px; }
+.lede, .note { color: var(--text-secondary); margin: 0 0 12px; }
+.note { font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 20px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.tile-label { color: var(--text-secondary); font-size: 13px; }
+.tile-value { font-size: 28px; font-weight: 600; margin: 4px 0; }
+.tile-sub { color: var(--muted); font-size: 12px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; margin-top: 10px; font-size: 13px;
+  font-weight: 600; color: var(--text-primary); }
+.chip-icon { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid var(--axis); font-size: 11px; }
+.card { margin-top: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 16px; height: 2px; border-radius: 1px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .lbl { fill: var(--text-secondary); font-size: 12px; }
+.tip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+  display: none; z-index: 10; min-width: 150px; }
+.tip .row { display: flex; align-items: center; gap: 8px; }
+.tip strong { font-variant-numeric: tabular-nums; }
+.tip .muted { color: var(--text-secondary); }
+.table-wrap { overflow-x: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-1); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+details { margin-top: 10px; font-size: 13px; }
+summary { cursor: pointer; color: var(--text-secondary); }
+ul.caveats { color: var(--text-secondary); padding-left: 20px; }
+"""
+
 _PATH_KS = list(range(config.CAR_PATH_WINDOW[0], config.CAR_PATH_WINDOW[1] + 1))
 
 
@@ -201,67 +263,7 @@ def build(results: pd.DataFrame, placebo: pd.DataFrame, tests: pd.DataFrame, met
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leakage Study Report</title>
 <style>
-:root {{
-  color-scheme: light;
-  --page: #f9f9f7; --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
-  --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
-  --series-1: #2a78d6; --series-2: #eb6834; --series-0: #898781;
-}}
-@media (prefers-color-scheme: dark) {{
-  :root:where(:not([data-theme="light"])) {{
-    color-scheme: dark;
-    --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
-    --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-    --series-1: #3987e5; --series-2: #d95926; --series-0: #898781;
-  }}
-}}
-:root[data-theme="dark"] {{
-  color-scheme: dark;
-  --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
-  --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5; --series-2: #d95926; --series-0: #898781;
-}}
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; background: var(--page); color: var(--text-primary);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
-main {{ max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }}
-h1 {{ font-size: 26px; margin: 0 0 4px; }}
-h2 {{ font-size: 19px; margin: 40px 0 8px; }}
-h3 {{ font-size: 16px; margin: 24px 0 6px; }}
-.lede, .note {{ color: var(--text-secondary); margin: 0 0 12px; }}
-.note {{ font-size: 13px; }}
-.tiles {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 20px; }}
-.tile, .card {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }}
-.tile-label {{ color: var(--text-secondary); font-size: 13px; }}
-.tile-value {{ font-size: 28px; font-weight: 600; margin: 4px 0; }}
-.tile-sub {{ color: var(--muted); font-size: 12px; }}
-.chip {{ display: inline-flex; gap: 6px; align-items: center; margin-top: 10px; font-size: 13px;
-  font-weight: 600; color: var(--text-primary); }}
-.chip-icon {{ display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
-  border: 1px solid var(--axis); font-size: 11px; }}
-.card {{ margin-top: 12px; }}
-.legend {{ display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }}
-.legend span {{ display: inline-flex; align-items: center; gap: 6px; }}
-.key {{ display: inline-block; width: 16px; height: 2px; border-radius: 1px; }}
-svg {{ display: block; width: 100%; height: auto; overflow: visible; }}
-svg text {{ fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }}
-svg .lbl {{ fill: var(--text-secondary); font-size: 12px; }}
-.tip {{ position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
-  display: none; z-index: 10; min-width: 150px; }}
-.tip .row {{ display: flex; align-items: center; gap: 8px; }}
-.tip strong {{ font-variant-numeric: tabular-nums; }}
-.tip .muted {{ color: var(--text-secondary); }}
-.table-wrap {{ overflow-x: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface-1); }}
-table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
-th, td {{ padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--grid); white-space: nowrap; }}
-th {{ color: var(--text-secondary); font-weight: 600; }}
-td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-details {{ margin-top: 10px; font-size: 13px; }}
-summary {{ cursor: pointer; color: var(--text-secondary); }}
-ul.caveats {{ color: var(--text-secondary); padding-left: 20px; }}
-</style>
+{_CSS}</style>
 </head>
 <body>
 <main>
@@ -462,6 +464,120 @@ coverage and SEBI orders for each.</p>
   pathChart(); typeChart();
 }})();
 </script>
+</body>
+</html>
+"""
+
+
+def _int(x) -> str:
+    return "" if pd.isna(x) else f"{x:,.0f}"
+
+
+def _lead_section(lead: dict) -> str:
+    ev, side = lead["event"], "calls" if lead["event"]["direction"] > 0 else "puts"
+    news = "good" if lead["event"]["direction"] > 0 else "bad"
+    facts = pd.DataFrame({
+        "Filed (IST)": [ev["timestamp"].strftime("%Y-%m-%d %H:%M:%S")], "Session": [ev["session"]],
+        "Type": [ev["event_type"]], "News": [f"{news} (news side = {side})"],
+        "News-side OTM z": [_num(ev["news_side_otm_vol_z"])], "Wrong-side OTM z": [_num(ev["wrong_side_otm_vol_z"])],
+        "Signed pre CAR": [_pct(ev["signed_pre_car"])], "Day-0 AR": [_pct(ev["day0_ar"])],
+        "Post CAR": [_pct(ev["post_car"])],
+    })
+    parts = [f'<h2 id="{html.escape(lead["anchor"])}">{html.escape(ev["symbol"])} &middot; '
+             f'Day 0 {ev["day0"]:%Y-%m-%d}</h2>',
+             f'<p class="lede">{html.escape(str(ev["headline"]))}</p>',
+             _table(facts, set(facts.columns[4:]))]
+
+    days = lead["days"]
+    if len(days):
+        window = days["k"].map(lambda k: "pre" if config.PRE_WINDOW[0] <= k <= config.PRE_WINDOW[1]
+                               else "Day 0" if k == 0 else "")
+        d = pd.DataFrame({
+            "Day": days["k"].map(lambda k: "Day 0" if k == 0 else f"t{k:+d}"), "Date": days["date"].dt.strftime("%Y-%m-%d"),
+            "Window": window, "Stock AR": days["ar"].map(_pct), "Volume x": days["vol_x"].map(lambda v: f"{v:.2f}x"),
+            f"OTM {side} vol (news side)": days["news_otm_vol"].map(_int),
+            "OTM vol (wrong side)": days["wrong_otm_vol"].map(_int),
+            "Call OI": days["call_oi"].map(_int), "Put OI": days["put_oi"].map(_int),
+        })
+        parts += ["<h3>Day by day</h3><p class=\"note\">Front-month options at least "
+                  f"{config.OTM_MIN_MONEYNESS:.0%} out of the money, volume in contracts. Volume x is the stock's "
+                  "volume against its [t-35, t-6] average.</p>", _table(d, set(d.columns[3:]))]
+
+    c = lead["contracts"]
+    parts.append(f"<h3>News-side contracts traded before the news ({side})</h3>")
+    if len(c):
+        t = pd.DataFrame({
+            "Expiry": c["expiry"].dt.strftime("%Y-%m-%d"), "Strike": c["strike"].map(lambda v: f"{v:,.2f}".rstrip("0").rstrip(".")),
+            "OTM at t-1": c["moneyness_t1"].map(lambda v: f"{abs(v):.1%}"), "Pre-window vol": c["pre_vol"].map(_int),
+            "Baseline daily vol": c["base_daily_vol"].map(lambda v: f"{v:,.1f}"),
+            "x baseline": c["pre_vs_base"].map(lambda v: "new" if v == float("inf") else f"{v:.1f}x"),
+            "OI t-6": c["oi_t6"].map(_int), "OI t-1": c["oi_t1"].map(_int),
+            "Premium t-1": c["premium_t1"].map(lambda v: "" if pd.isna(v) else f"{v:.2f}"),
+            "Premium Day 0": c["premium_day0"].map(lambda v: "" if pd.isna(v) else f"{v:.2f}"),
+            "Premium chg": c["premium_chg"].map(_pct),
+        })
+        parts += ["<p class=\"note\">Ranked by pre-window [t-5, t-1] volume. \"x baseline\" compares the "
+                  "pre-window daily average with the contract's own [t-35, t-6] average (\"new\" = no baseline "
+                  "trades). Premiums are exchange closing prices; thinly traded contracts may close at stale "
+                  "prices.</p>", _table(t, set(t.columns[1:]))]
+    else:
+        parts.append("<p>No news-side OTM contract traded in the pre-window.</p>")
+
+    f = lead["filings"]
+    parts.append("<h3>Exchange filings around the event</h3>")
+    if len(f):
+        ft = pd.DataFrame({"Time (IST)": f["timestamp"].dt.strftime("%Y-%m-%d %H:%M"),
+                           "Classified as": f["event_type"].fillna("routine"),
+                           "Subject": (f["subject"] + " | " + f["headline"]).str.slice(0, 120)})
+        parts.append(_table(ft))
+    else:
+        parts.append("<p>No BSE filings in the window.</p>")
+
+    pr = lead["press"]
+    parts.append("<h3>Press coverage before the filing</h3>")
+    if lead.get("press_error"):
+        parts.append(f"<p class=\"note\">Press search failed: {html.escape(lead['press_error'])}</p>")
+    elif len(pr):
+        pt = pd.DataFrame({"Date": pr["date"].dt.strftime("%Y-%m-%d"),
+                           "Matches story": pr["match"].map({True: "yes", False: ""}),
+                           "Before filing day": pr["before"].map({True: "yes", False: ""}),
+                           "Source": pr["source"].str.slice(0, 30), "Title": pr["title"].str.slice(0, 120)})
+        parts += ["<p class=\"note\">Google News search for the company; dates only (no times), and results "
+                  "vary between runs, so absence of coverage is not proof the story was private.</p>",
+                  _table(pt)]
+    else:
+        parts.append("<p>No articles returned.</p>")
+    return "\n".join(parts)
+
+
+def build_drilldown(leads: list[dict], meta: dict) -> str:
+    """One page with a section per lead: event facts, day-by-day flow, contracts, filings, press."""
+    toc = "".join(f'<li><a href="#{html.escape(l["anchor"])}">{html.escape(l["event"]["symbol"])} '
+                  f'{l["event"]["day0"]:%Y-%m-%d}</a> &middot; {html.escape(str(l["event"]["event_type"]))}</li>'
+                  for l in leads)
+    body = "\n".join(_lead_section(l) for l in leads)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Option Flow Drill-down</title>
+<style>
+{_CSS}
+a {{ color: var(--series-1); }}
+</style>
+</head>
+<body>
+<main>
+<h1>Directional option flow: event drill-down</h1>
+<p class="lede">{html.escape(meta['source'])} &middot; {len(leads)} events</p>
+<p class="note">Each event had significant short-dated out-of-the-money option volume on the side that profits from
+the news, above the wrong side. These are statistical leads, not findings of wrongdoing. Look for: press
+coverage before the filing (the news was already public), the contracts' timing and size, and the premium jump
+on Day 0.</p>
+<ul>{toc}</ul>
+{body}
+</main>
 </body>
 </html>
 """
