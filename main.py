@@ -17,7 +17,7 @@ import requests
 import config
 import report
 from event_study import (build_events, earliest_exchange_time, generic_words, leakage_tests, media_lead,
-                         placebo_events, run_event_study, summarise)
+                         placebo_events, rank_directional_otm, run_event_study, summarise)
 from media_client import MediaClient, MediaError, company_query
 from news_scraper import BSEScraper
 from nse_client import NSEClient, NSEError
@@ -123,7 +123,7 @@ def print_tests(t: pd.DataFrame) -> None:
     if extra:
         cols = {}
         for c in extra:
-            fmt = pct if c.endswith("_chg_pre") else share if c == "deal_any" else num
+            fmt = pct if c.endswith("_chg_pre") or c == "signed_oi_tilt" else share if c == "deal_any" else num
             cols[config.EXTRA_SIGNAL_COLUMNS[c]] = t[c].map(fmt)
             cols[config.EXTRA_SIGNAL_COLUMNS[c] + " p"] = t[c + "_p"].map(p)
         print("\nPositioning signals before Day 0 (mean per event; Welch p vs placebo days, placebo row vs 0)")
@@ -172,10 +172,12 @@ def study_stock(sym: str, key: str, scrip: int, args, upstox: UpstoxClient, nse:
         try:
             if args.oi_source == "nse":
                 fo = nse.get_fo_activity(sym, stock.index)
-            else:  # futures OI only
-                fo = upstox.get_expired_futures_oi(key, price_from, today).rename(columns={"oi": "fut_oi"})
+            else:  # near-month futures only, in the same long format as the NSE rows
+                fut = upstox.get_expired_futures_oi(key, price_from, today).reset_index()
+                fo = pd.DataFrame({"date": fut["date"], "kind": "FUT", "expiry": pd.to_datetime(fut["expiry"]),
+                                   "otm": False, "front": True, "vol": fut["volume"], "oi": fut["oi"]})
             if verbose:
-                print(f"F&O ({args.oi_source}): {len(fo)} sessions")
+                print(f"F&O ({args.oi_source}): {fo['date'].nunique()} sessions")
         except (UpstoxError, NSEError) as e:
             print(f"  {sym}: F&O skipped: {e}")
     deals = None
@@ -326,9 +328,12 @@ def main() -> int:
     for sym, filings in all_filings.items():
         filings.to_csv(OUTPUT_DIR / f"bse_filings_{sym}_{today:%Y%m%d}.csv", index=False)
     page = OUTPUT_DIR / f"report_{stem}_{today:%Y%m%d}.html"
+    ranked = rank_directional_otm(results)
+    if len(ranked):
+        ranked.to_csv(OUTPUT_DIR / f"otm_leads_{stem}_{today:%Y%m%d}.csv", index=False)
     page.write_text(report.build(results, placebo, tests, {
         "label": label, "period": f"{news_from} to {today}", "signals": ", ".join(sorted(args.signals)) or "none",
-    }), encoding="utf-8")
+    }, ranked), encoding="utf-8")
     print(f"\nSaved: {out.relative_to(config.BASE_DIR)} (+ placebo, tests and filing audit CSVs)")
     print(f"Report: {page.relative_to(config.BASE_DIR)}")
     return 0

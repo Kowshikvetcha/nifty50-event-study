@@ -15,7 +15,7 @@ Events are compared against their own baselines and against random non-event day
 - **Filings:** BSE announcements are classified by a keyword filter that drops routine compliance filings. Each filing's public time is the earlier of its BSE and NSE broadcasts, to the second.
 - **Directional tests:** the pre-window [t-5, t-1] Nifty-adjusted CAR is signed by the news direction and tested four ways: t-test, BMP standardised test, sign test, and a placebo bootstrap. Results are split into scheduled news (results, dividends, board outcomes) and unscheduled news, where leakage evidence matters most.
 - **Signals:**
-  - `fno`: futures OI change, option volume and call/put skew before the event (NSE bhavcopy, free).
+  - `fno`: futures and option OI build-up (call vs put, adjusted for monthly expiries), option volume, and short-dated out-of-the-money volume on the side that would profit from the news (NSE bhavcopy, free).
   - `deals`: bulk/block deals in the 30 sessions before (NSE).
   - `intraday`: for filings released during market hours, the abnormal return and volume in the hour before the filing minute (Upstox 1-minute candles).
   - `media` (opt-in, experimental): whether matching press coverage appeared on a day before the filing (Google News RSS).
@@ -82,6 +82,7 @@ On Windows, prefix commands with `PYTHONIOENCODING=utf-8` when running from bash
 | `event_study_<SYMBOL>_<date>.csv` (single-stock run) or `panel_events_<date>.csv` (pooled run) | One row per event with every metric |
 | `placebo_*.csv` | The placebo days, measured the same way |
 | `tests_*.csv` | The hypothesis-test table |
+| `otm_leads_*.csv` | Unscheduled events with significant short-dated OTM option volume on the side that profits from the news, ranked; leads to investigate, not findings |
 | `bse_filings_<SYMBOL>_<date>.csv` | Every fetched filing with its `event_type`, for auditing the filter |
 
 ### Reading the results

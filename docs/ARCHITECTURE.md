@@ -127,15 +127,27 @@ Per group, `leakage_tests` reports:
 
 ### F&O positioning (`measure_fno`, signal `fno`)
 
-- **Source:** NSE daily F&O bhavcopy, UDiFF format, available from July 2024. One zip per session is aggregated per symbol into `data/cache/nse_fo_<YYYYMMDD>.csv` and shared by every stock.
-- **Aggregation:**
-  - futures OI and volume are summed over live expiries, which avoids the artificial drop at the roll;
-  - call and put volume and OI are summed over all strikes and expiries.
+- **Source:** NSE daily F&O bhavcopy, UDiFF format, available from July 2024. One zip per session is aggregated into `data/cache/nse_fo2_<YYYYMMDD>.csv` and shared by every stock. It has one row per (symbol, kind FUT/CE/PE, expiry, `otm`) with volume and OI, plus a `front` flag for each symbol's nearest expiry. `otm` means at least `OTM_MIN_MONEYNESS` (2%) out of the money against that day's underlying price. `fo_daily` rolls these rows up to per-session totals.
+- **OI changes run from close of t-6 to close of t-1 on total OI, skipping the step right after an expiry** (`_oi_chg_ex_expiry`).
+  - Rollover moves OI from the front month to the next and leaves the total unchanged. The unrolled remainder vanishes in the session *after* expiry; the bhavcopy still lists the series on expiry day. Skipping that one step removes the drop.
+  - Restricting to contracts alive at t-1 does **not** work: it books the whole rollover inflow as new positions (+65% on placebo days in testing).
 - **Metrics:**
-  - `fut_oi_chg_pre = fut_oi[t-1] / fut_oi[t-6] − 1`;
-  - `opt_vol_z` (pre-window option volume against the baseline);
-  - `call_skew_z` (pre-window call share of option volume against the baseline, as a standard error of the mean), and `signed_call_skew_z = direction · call_skew_z`.
-- **Upstox alternative:** `--oi-source upstox` uses expired near-month futures (Plus plan). That series is near-month only, so it collapses at each expiry, and it stops at the last expiry. Prefer NSE.
+
+  | Metric | Meaning |
+  |---|---|
+  | `fut_oi_chg_pre` | futures OI change, as above |
+  | `opt_oi_chg_pre`, `call_oi_chg_pre`, `put_oi_chg_pre` | option OI changes, the same way |
+  | `signed_oi_tilt` | `direction · (call_oi_chg_pre − put_oi_chg_pre)`: calls building faster than puts before good news is > 0 |
+  | `opt_vol_z` | pre-window option volume against the baseline |
+  | `call_skew_z`, `signed_call_skew_z` | call share of option volume, as a standard error of the mean |
+  | `otm_ce_vol_z`, `otm_pe_vol_z` | front-month OTM call and put volume, each against its own baseline |
+  | `news_side_otm_vol_z`, `wrong_side_otm_vol_z` | the same split by news direction: calls before good news, puts before bad. The wrong side is the control. |
+
+  The OTM split follows the literature: informed traders buy cheap, short-dated OTM options.
+- **The expiry cycle matters for OI.** Option OI builds through each monthly cycle; on placebo days the median 5-day change runs from −4% just after expiry to +32% 6–10 sessions in. Events and placebo days are spread across the cycle similarly, so the placebo comparison is fair. When reading a group's OI number, still check it against the cycle: scheduled events stayed +13% above placebo when matched on sessions-since-expiry.
+- **Upstox alternative:** `--oi-source upstox` uses expired near-month futures (Plus plan). It covers futures only and stops at the last expiry. Prefer NSE.
+
+**Leads list (`rank_directional_otm`).** Unscheduled, non-overlapping events are kept when `news_side_otm_vol_z ≥ 1.96` and the news side exceeds the wrong side. They are ranked by the gap and written to `output/otm_leads_*.csv` and the report. Many leads are "Clarification sought" events, where the media report came before the filing; check the press timeline before treating a lead as insider trading.
 
 ### Bulk and block deals (`measure_deals`, signal `deals`)
 
@@ -199,12 +211,12 @@ Because direction comes from the reaction, every path rises after Day 0 by const
 | `intraday_*_<YYYYMM>.csv.gz` | 1-minute candles | instrument and month; completed months only |
 | `bse_<scrip>_*` | BSE filings | scrip and range |
 | `nse_ann_*` | NSE filings | symbol and range |
-| `nse_fo_<date>` | per-symbol F&O aggregates | session, shared by all symbols |
+| `nse_fo2_<date>` | F&O aggregates per symbol, kind, expiry and moneyness | session, shared by all symbols |
 | `nse_deals_*` | bulk and block deals | symbol and range |
 | `nifty50_<date>` | constituents | day |
 | `gnews_*` | Google News results | company and range |
 
-Old `nse_stf_*` files come from the earlier futures-only version and can be deleted.
+Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggregation and can be deleted.
 
 ## File reference
 
@@ -227,6 +239,7 @@ Old `nse_stf_*` files come from the earlier futures-only version and can be dele
 - **SEBI PIT insider disclosures are not used.** NSE `/api/corporates-pit` returns zero rows all year for HDFCBANK and TCS, and nothing for INFY after April 2026, so its absence can't be read as "no insider trades". BSE has an `InsiderTrade15/w` endpoint, but its parameters are unknown. Capture the request from the BSE website in browser devtools to add it.
 - **Upstox daily candles need no token; intraday v3 and the expired-instrument endpoints do.** The expired endpoints also need the Plus plan (`UDAPI1149`). A token issued before a plan upgrade keeps the old entitlements, so regenerate it.
 - **Prices are not adjusted for corporate actions.** `measure_event` skips any event with a daily |return| > `PRICE_BREAK_THRESHOLD` (20%) in [t-35, t+5]; Tata Motors' Oct-2025 demerger exercises this. `TMPV` is Tata Motors after the demerger (BSE 500570 unchanged).
+- **SAST disclosures are routine, not M&A.** Reg 29(1)/29(2), 31 and 10(6) filings are a shareholder reporting its own stake change or pledge after the fact. Their titles contain "Substantial Acquisition of Shares", which used to match the M&A rule: 87 filings, 23 of the unscheduled events. They are now excluded by subcategory and by text pattern.
 - **The filter is a keyword heuristic.** It was tuned on Reliance's filings. Always audit `output/bse_filings_*.csv` after changing the rules.
 - **Overlap is common** for active filers. Prefer the non-overlapping groups.
 - **Survivorship:** the universe is *today's* Nifty 50.

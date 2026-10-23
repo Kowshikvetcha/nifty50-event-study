@@ -194,23 +194,60 @@ def measure_event(px: pd.DataFrame, day0: pd.Timestamp) -> dict:
     return out
 
 
-def measure_fno(fo: pd.DataFrame, day0: pd.Timestamp) -> dict:
+def fo_daily(long: pd.DataFrame) -> pd.DataFrame:
+    """Per-session totals from long-format F&O rows: fut/ce/pe volume and OI, plus front-month OTM volume."""
+    vol = long.pivot_table(index="date", columns="kind", values="vol", aggfunc="sum")
+    oi = long.pivot_table(index="date", columns="kind", values="oi", aggfunc="sum")
+    out = pd.concat([vol.add_suffix("_vol"), oi.add_suffix("_oi")], axis=1)
+    out.columns = out.columns.str.lower()
+    otm = long[long["otm"] & long["front"]].pivot_table(index="date", columns="kind", values="vol", aggfunc="sum")
+    for side in ("CE", "PE"):
+        out[f"otm_{side.lower()}_vol"] = otm[side] if side in otm else 0.0
+    return out.fillna(0).sort_index()
+
+
+def _oi_chg_ex_expiry(total: pd.Series, expiries: pd.DatetimeIndex, i0: int, i1: int) -> float:
+    """Total-OI change from session i0 to i1, skipping the step in which an expired series drops out.
+
+    Rollover moves OI from the front month into the next and leaves the total unchanged, but the unrolled
+    remainder vanishes in the session after expiry (the bhavcopy still lists it on expiry day). Measuring only
+    the contract set alive at the end does not work: it books the whole rollover inflow as new positions.
+    """
+    s = total.iloc[i0:i1 + 1]
+    if len(s) < 2 or s.iloc[0] <= 0:
+        return np.nan
+    steps = s.diff().iloc[1:]
+    prev = s.index[:-1]
+    expired = [((expiries >= p) & (expiries < d)).any() for p, d in zip(prev, s.index[1:])]
+    return steps[~np.array(expired)].sum() / s.iloc[0]
+
+
+def _side_z(series: pd.Series, a: int, b: int, pre: slice) -> float:
+    mu, sd = series.iloc[a:b + 1].mean(), series.iloc[a:b + 1].std(ddof=1)
+    return (series.iloc[pre].mean() - mu) / sd if sd > 0 else np.nan
+
+
+def measure_fno(long: pd.DataFrame, daily: pd.DataFrame, day0: pd.Timestamp) -> dict:
     """Pre-window F&O positioning vs the same [t-35, t-6] baseline as prices.
 
-    fo is indexed by session with fut_oi and (optionally) ce_vol / pe_vol / ce_oi / pe_oi.
-    Option volume has a monthly expiry cycle; the 30-session baseline spans at least one full cycle.
+    long: rows (date, kind, expiry, otm, front, vol, oi); daily: fo_daily(long). OI changes run from t-6 to
+    t-1 on contracts alive throughout. Option volume has a monthly expiry cycle; the 30-session baseline
+    spans at least one full cycle. Upstox-sourced data has futures only, so only fut_oi_chg_pre is set.
     """
-    if day0 not in fo.index:
+    if day0 not in daily.index:
         return {}
-    i = fo.index.get_loc(day0)
+    i = daily.index.get_loc(day0)
     pre_lo, pre_hi = config.PRE_WINDOW
     a, b = i + pre_lo - config.BASELINE_DAYS, i + pre_lo - 1
     if a < 0:
         return {}
-    out = {"fut_oi_chg_pre": fo["fut_oi"].iloc[i + pre_hi] / fo["fut_oi"].iloc[i + pre_lo - 1] - 1
-           if fo["fut_oi"].iloc[i + pre_lo - 1] > 0 else np.nan}
-    if "ce_vol" not in fo:
+    i0, i1 = i + pre_lo - 1, i + pre_hi  # OI change from close of t-6 to close of t-1
+    pre = slice(i + pre_lo, i + pre_hi + 1)
+    expiries = pd.DatetimeIndex(long["expiry"].unique())
+    out = {"fut_oi_chg_pre": _oi_chg_ex_expiry(daily["fut_oi"], expiries, i0, i1)}
+    if "ce_vol" not in daily:
         return out
+    fo = daily
     opt_vol = fo["ce_vol"] + fo["pe_vol"]
     mu, sd = opt_vol.iloc[a:b + 1].mean(), opt_vol.iloc[a:b + 1].std(ddof=1)
     out["opt_vol_ratio"] = opt_vol.iloc[i + pre_lo:i + pre_hi + 1].mean() / mu if mu > 0 else np.nan
@@ -222,9 +259,12 @@ def measure_fno(fo: pd.DataFrame, day0: pd.Timestamp) -> dict:
         out["call_skew"] = p_share.mean() - b_share.mean()
         se = b_share.std(ddof=1) / np.sqrt(len(p_share))
         out["call_skew_z"] = out["call_skew"] / se if se > 0 else np.nan
-    opt_oi = fo["ce_oi"] + fo["pe_oi"]
-    prev = opt_oi.iloc[i + pre_lo - 1]
-    out["opt_oi_chg_pre"] = opt_oi.iloc[i + pre_hi] / prev - 1 if prev > 0 else np.nan
+    out["opt_oi_chg_pre"] = _oi_chg_ex_expiry(fo["ce_oi"] + fo["pe_oi"], expiries, i0, i1)
+    out["call_oi_chg_pre"] = _oi_chg_ex_expiry(fo["ce_oi"], expiries, i0, i1)
+    out["put_oi_chg_pre"] = _oi_chg_ex_expiry(fo["pe_oi"], expiries, i0, i1)
+    # Front-month OTM flow per side, each against its own baseline; signed into news/wrong side later.
+    out["otm_ce_vol_z"] = _side_z(fo["otm_ce_vol"], a, b, pre)
+    out["otm_pe_vol_z"] = _side_z(fo["otm_pe_vol"], a, b, pre)
     return out
 
 
@@ -322,11 +362,33 @@ def add_direction_metrics(res: pd.DataFrame) -> pd.DataFrame:
     res["runup_ratio"] = np.where(total.abs() >= config.RUNUP_MIN_MOVE, res["pre_car"] / total, np.nan)
     if "call_skew_z" in res:
         res["signed_call_skew_z"] = res["direction"] * res["call_skew_z"]
+    if "call_oi_chg_pre" in res:
+        # Calls building faster than puts before good news (and the reverse before bad news) is > 0.
+        res["signed_oi_tilt"] = res["direction"] * (res["call_oi_chg_pre"] - res["put_oi_chg_pre"])
+        good = res["direction"] > 0
+        res["news_side_otm_vol_z"] = res["otm_ce_vol_z"].where(good, res["otm_pe_vol_z"])
+        res["wrong_side_otm_vol_z"] = res["otm_pe_vol_z"].where(good, res["otm_ce_vol_z"])
+        res.loc[res["direction"] == 0, ["signed_oi_tilt", "news_side_otm_vol_z", "wrong_side_otm_vol_z"]] = np.nan
     if "intra_pre_ar_z" in res:
         # Day-0 AR would include the pre-filing minutes themselves; sign by the reaction after the filing.
         intra_dir = np.sign(res["intra_post_ar"] + res["post_car"].fillna(0))
         res["signed_intra_ar_z"] = intra_dir * res["intra_pre_ar_z"]
     return res
+
+
+def rank_directional_otm(results: pd.DataFrame) -> pd.DataFrame:
+    """Unscheduled, non-overlapping events with significant short-dated OTM flow on the side that profits
+    from the news, ranked by how far it exceeds the wrong side.
+
+    Both sides elevated is a volatility bet; only a news-side excess is the informed-trading footprint
+    (Augustin, Brenner & Subrahmanyam). These are leads to check against filings, press and SEBI orders.
+    """
+    if "news_side_otm_vol_z" not in results:
+        return pd.DataFrame()
+    u = results[~results["overlap"] & ~results["scheduled"]].copy()
+    u["otm_side_gap"] = u["news_side_otm_vol_z"] - u["wrong_side_otm_vol_z"]
+    u = u[(u["news_side_otm_vol_z"] >= config.SIGNIFICANCE_Z) & (u["otm_side_gap"] > 0)]
+    return u.sort_values("otm_side_gap", ascending=False).reset_index(drop=True)
 
 
 def placebo_events(trading_days: pd.DatetimeIndex, event_day0s: list, n: int,
@@ -353,6 +415,7 @@ def run_event_study(events: pd.DataFrame, stock: pd.DataFrame, market: pd.DataFr
                     deals: pd.DataFrame | None = None,
                     intraday: tuple[pd.DataFrame, pd.DataFrame] | None = None) -> pd.DataFrame:
     px = prepare_prices(stock, market)
+    fo_d = fo_daily(fo) if fo is not None else None  # fo is long-format (see measure_fno)
     rows = []
     day0s = list(events["day0"]) if not events.empty else []
     for ev in events.itertuples(index=False):
@@ -369,7 +432,7 @@ def run_event_study(events: pd.DataFrame, stock: pd.DataFrame, market: pd.DataFr
         lo = px.index[max(i + config.PRE_WINDOW[0], 0)]
         hi = px.index[min(i + config.POST_WINDOW[1], len(px) - 1)]
         overlap = any(lo <= d <= hi and d != ev.day0 for d in day0s)
-        fno = measure_fno(fo, ev.day0) if fo is not None else {}
+        fno = measure_fno(fo, fo_d, ev.day0) if fo is not None else {}
         dl = measure_deals(deals, px.index, ev.day0) if deals is not None else {}
         # Only filings released in-session on Day 0 itself have a well-defined "minutes before".
         intra = (measure_intraday(*intraday, ev.timestamp)

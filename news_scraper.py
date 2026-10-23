@@ -44,13 +44,19 @@ ROUTINE_PATTERNS = re.compile(
     r"earnings call|transcript|audio recording|credit rating|loss of share certificate|duplicate share|"
     r"compliance certificate|reg(ulation)?\.? ?(7|13|24|39|40|74)\b|secretarial|annual report|brsr|"
     r"esop|esos|allotment of|record date|intimation of board meeting|prior intimation|"
-    r"postal ballot|change in (director|kmp|auditor)|book closure|shareholding pattern",
+    r"postal ballot|change in (director|kmp|auditor)|book closure|shareholding pattern|"
+    # SAST: a shareholder reporting its own stake change after the fact; "acquisition" in the title is not M&A
+    r"substantial acquisition of shares",
     re.IGNORECASE,
 )
 ROUTINE_SUBCATEGORIES = {
     "Closure of Trading Window", "Analyst / Investor Meet", "Credit Rating", "Earnings Call Transcript",
     "Board Meeting", "AGM", "Postal Ballot", "Record Date", "Allotment of ESOP / ESPS",
     "Reg. 34 (1) Annual Report", "Reg.24(A)-Annual Secretarial Compliance",
+    "Disclosures under Reg. 29(1) of SEBI (SAST) Regulations, 2011",
+    "Disclosures under Reg. 29(2) of SEBI (SAST) Regulations, 2011",
+    "Disclosures under Reg. 31(1) and 31(2) of SEBI (SAST) Regulations, 2011",
+    "Disclosures under Reg. 10(6) of SEBI (SAST) Regulations, 2011",
 }
 
 

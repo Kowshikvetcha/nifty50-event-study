@@ -116,16 +116,18 @@ class NSEClient:
         return df
 
     def _fo_day(self, day: date) -> pd.DataFrame | None:
-        """Per-symbol stock F&O activity for one session, cached per day. None if no file (holiday / not out yet).
+        """Stock F&O activity for one session, aggregated per (symbol, kind, expiry, otm). Cached per day;
+        None if there is no file (holiday / not out yet).
 
-        Futures OI is summed over live expiries (avoids the roll artefact); option volume (contracts) and OI
-        are summed over all strikes and expiries, split by calls and puts.
+        kind is FUT / CE / PE. Expiry is kept so OI changes can be measured on contracts alive for the whole
+        window (OI of an expiring series vanishes on expiry day). otm marks options at least OTM_MIN_MONEYNESS
+        out of the money against that day's underlying price; front marks each symbol's nearest expiry.
         """
         if day in self._fo_mem:
             return self._fo_mem[day]
-        cache_file = config.CACHE_DIR / f"nse_fo_{day:%Y%m%d}.csv"
+        cache_file = config.CACHE_DIR / f"nse_fo2_{day:%Y%m%d}.csv"
         if cache_file.exists():
-            agg = pd.read_csv(cache_file, index_col="symbol")
+            agg = pd.read_csv(cache_file, parse_dates=["expiry"]).set_index("symbol")
         else:
             resp = self._get(config.NSE_FO_BHAVCOPY_URL.format(yyyymmdd=f"{day:%Y%m%d}"))
             time.sleep(config.NSE_REQUEST_PAUSE_SEC)
@@ -135,28 +137,37 @@ class NSEClient:
             if resp.status_code != 200:
                 raise NSEError(f"{resp.status_code} from NSE bhavcopy for {day}")
             df = pd.read_csv(io.BytesIO(resp.content), compression="zip")
-            fut = df[df["FinInstrmTp"] == "STF"].groupby("TckrSymb").agg(
-                fut_oi=("OpnIntrst", "sum"), fut_vol=("TtlTradgVol", "sum"), fut_n=("OpnIntrst", "size"))
-            opt = df[df["FinInstrmTp"] == "STO"].pivot_table(
-                index="TckrSymb", columns="OptnTp", values=["TtlTradgVol", "OpnIntrst"], aggfunc="sum")
-            opt.columns = [f"{side.lower()}_{'vol' if v == 'TtlTradgVol' else 'oi'}" for v, side in opt.columns]
-            agg = fut.join(opt, how="outer").fillna(0).rename_axis("symbol")
-            agg.to_csv(cache_file)
+            df = df[df["FinInstrmTp"].isin(["STF", "STO"])]
+            kind = df["OptnTp"].where(df["FinInstrmTp"] == "STO", "FUT")
+            m = config.OTM_MIN_MONEYNESS
+            otm = ((kind == "CE") & (df["StrkPric"] >= df["UndrlygPric"] * (1 + m))) | \
+                  ((kind == "PE") & (df["StrkPric"] <= df["UndrlygPric"] * (1 - m)))
+            long = pd.DataFrame({"symbol": df["TckrSymb"], "kind": kind,
+                                 "expiry": pd.to_datetime(df["XpryDt"]), "otm": otm,
+                                 "vol": df["TtlTradgVol"], "oi": df["OpnIntrst"]})
+            agg = long.groupby(["symbol", "kind", "expiry", "otm"], as_index=False)[["vol", "oi"]].sum()
+            agg["front"] = agg["expiry"] == agg.groupby("symbol")["expiry"].transform("min")
+            agg.to_csv(cache_file, index=False)
+            agg = agg.set_index("symbol")
         self._fo_mem[day] = agg
         return agg
 
     def get_fo_activity(self, symbol: str, sessions: pd.DatetimeIndex) -> pd.DataFrame:
-        """Daily futures OI/volume and call/put volume/OI for one symbol; sessions without a file are skipped."""
-        rows = {}
+        """Long-format F&O rows (date, kind, expiry, otm, front, vol, oi) for one symbol.
+
+        Sessions without a file are skipped.
+        """
+        frames = []
         for ts in sessions:
             agg = self._fo_day(ts.date())
             if agg is not None and symbol.upper() in agg.index:
-                rows[ts] = agg.loc[symbol.upper()]
-        if not rows:
+                frames.append(agg.loc[[symbol.upper()]].assign(date=ts))
+        if not frames:
             raise NSEError(f"No NSE F&O data for {symbol} (bhavcopy UDiFF format starts Jul-2024)")
-        return pd.DataFrame.from_dict(rows, orient="index").rename_axis("date").sort_index()
+        return pd.concat(frames).reset_index(drop=True)
 
     def get_futures_oi(self, symbol: str, sessions: pd.DatetimeIndex) -> pd.DataFrame:
         """Total futures OI (summed over live expiries) per session."""
         fo = self.get_fo_activity(symbol, sessions)
-        return fo[["fut_oi", "fut_n"]].rename(columns={"fut_oi": "oi", "fut_n": "n_expiries"})
+        fut = fo[fo["kind"] == "FUT"].groupby("date")
+        return pd.DataFrame({"oi": fut["oi"].sum(), "n_expiries": fut["oi"].size()})

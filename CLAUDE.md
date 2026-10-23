@@ -42,6 +42,7 @@ Flat modules, with `config.py` imported by everything:
 - **Google News is non-deterministic** for the same query, so `media` is opt-in and experimental. Its pubDates are date-only.
 - **Upstox token**: needed for intraday (v3) and expired futures (also needs the Plus plan). Tokens expire daily; a token issued before a plan upgrade keeps the old entitlements.
 - **F&O defaults to the NSE bhavcopy** (UDiFF format, from Jul-2024 only). `--oi-source upstox` gives near-month futures only, which collapse at each expiry.
+- **SAST filings ("Substantial Acquisition of Shares") are routine**: shareholder stake and pledge reports, not company M&A. Keep them in `ROUTINE_SUBCATEGORIES` / `ROUTINE_PATTERNS`.
 - **Check the placebo row** after any methodology change: signed pre-CAR should be about 0, and Right way about 50%.
 - `data/`, `output/`, `.env` and `.venv/` are generated or secret and git-ignored. Never commit `.env`.
 - Tata Motors trades as `TMPV` after the Oct-2025 demerger (BSE 500570 unchanged).

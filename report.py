@@ -67,23 +67,25 @@ def _tiles(tests: pd.DataFrame) -> str:
     def row(name):
         return tests.loc[name] if name in tests.index else None
 
-    unsched, clean = row("Unscheduled (non-ovl)"), row("Non-overlapping")
+    # Verdicts use unscheduled news only: before scheduled results the market knows the date and positions
+    # for it openly (option OI and volume rise), which is not leakage.
+    u = row("Unscheduled (non-ovl)")
     specs = []
-    if unsched is not None:
-        specs.append(("Price drift before unscheduled news", _pct(unsched["signed_pre_car"]),
-                      f"t-test p {_p(unsched['signed_p'])} · placebo p {_p(unsched['placebo_p'])}",
-                      [unsched["signed_p"], unsched["placebo_p"]]))
-    if clean is not None:
-        specs.append(("Abnormal share volume, t-5..t-1", _num(clean["vol_z"]) + " z",
-                      f"p {_p(clean['vol_p'])} vs 0", [clean["vol_p"]]))
+    if u is not None:
+        specs.append(("Price drift", _pct(u["signed_pre_car"]),
+                      f"t-test p {_p(u['signed_p'])} · placebo p {_p(u['placebo_p'])}",
+                      [u["signed_p"], u["placebo_p"]]))
+        specs.append(("Share volume, t-5..t-1", _num(u["vol_z"]) + " z", f"p {_p(u['vol_p'])} vs 0", [u["vol_p"]]))
         for col, title, fmt in [("opt_vol_z", "Option volume, t-5..t-1", _num),
-                                ("fut_oi_chg_pre", "Futures OI build-up, t-5..t-1", _pct),
+                                ("news_side_otm_vol_z", "Short-dated OTM options on the news side", _num),
+                                ("opt_oi_chg_pre", "Option OI build-up, t-6..t-1", _pct),
+                                ("fut_oi_chg_pre", "Futures OI build-up, t-6..t-1", _pct),
                                 ("signed_intra_ar_z", "Price move in the hour before in-session filings", _num),
                                 ("intra_vol_z", "Volume in the hour before in-session filings", _num)]:
-            if col in clean and not pd.isna(clean[col]):
+            if col in u and not pd.isna(u[col]):
                 unit = "" if fmt is _pct else " z"
-                specs.append((title, fmt(clean[col]) + unit, f"p {_p(clean[col + '_p'])} vs placebo days",
-                              [clean[col + "_p"]]))
+                specs.append((title, fmt(u[col]) + unit, f"p {_p(u[col + '_p'])} vs placebo days",
+                              [u[col + "_p"]]))
     out = []
     for title, value, sub, ps in specs:
         icon, label = _verdict(ps)
@@ -117,7 +119,7 @@ def _tests_tables(t: pd.DataFrame) -> str:
     if extra:
         cols = {"Group": t.index, "N": t["n"].astype(int)}
         for c in extra:
-            fmt = _pct if c.endswith("_chg_pre") else (lambda x: "" if pd.isna(x) else f"{x:.0%}") \
+            fmt = _pct if c.endswith("_chg_pre") or c == "signed_oi_tilt" else (lambda x: "" if pd.isna(x) else f"{x:.0%}") \
                 if c == "deal_any" else _num
             cols[config.EXTRA_SIGNAL_COLUMNS[c]] = t[c].map(fmt)
             cols[config.EXTRA_SIGNAL_COLUMNS[c] + " p"] = t[c + "_p"].map(_p)
@@ -144,7 +146,24 @@ def _top_events(clean: pd.DataFrame, n: int = 15) -> str:
     return _table(df, {"Signed pre CAR", "CAR z", "Vol z", "Option vol z", "Intraday z"})
 
 
-def build(results: pd.DataFrame, placebo: pd.DataFrame, tests: pd.DataFrame, meta: dict) -> str:
+def _otm_leads(ranked: pd.DataFrame, n: int = 20) -> str:
+    if ranked.empty:
+        return "<p>No unscheduled event had significant news-side OTM flow above the wrong side.</p>"
+    r = ranked.head(n)
+    side = r["direction"].map({1.0: "calls", -1.0: "puts"})
+    df = pd.DataFrame({
+        "Stock": r["symbol"], "Day 0": r["day0"].dt.strftime("%Y-%m-%d"),
+        "Filed (IST)": r["timestamp"].dt.strftime("%Y-%m-%d %H:%M"), "Type": r["event_type"],
+        "Headline": r["headline"].str.slice(0, 60), "News side": side,
+        "News-side z": r["news_side_otm_vol_z"].map(_num), "Wrong-side z": r["wrong_side_otm_vol_z"].map(_num),
+        "Gap": r["otm_side_gap"].map(_num), "Signed pre CAR": r["signed_pre_car"].map(_pct),
+        "Day-0 AR": r["day0_ar"].map(_pct), "Post CAR": r["post_car"].map(_pct),
+    })
+    return _table(df, {"News-side z", "Wrong-side z", "Gap", "Signed pre CAR", "Day-0 AR", "Post CAR"})
+
+
+def build(results: pd.DataFrame, placebo: pd.DataFrame, tests: pd.DataFrame, meta: dict,
+          otm_ranked: pd.DataFrame | None = None) -> str:
     clean = results[~results["overlap"]]
     path = {
         "x": _PATH_KS,
@@ -254,6 +273,9 @@ signals: {html.escape(meta['signals'])}</p>
 public. Each event's pre-window [t-5, t-1] is compared against its own 30-session baseline and against random
 non-event days for the same stocks (placebo).</p>
 
+<h2>Verdicts: unscheduled news, non-overlapping events</h2>
+<p class="note">Scheduled news (results, dividends, board outcomes) is excluded here: its date is public, so
+positioning before it is expected. Its numbers are in the tables below.</p>
 <section class="tiles">
 {_tiles(tests)}
 </section>
@@ -281,6 +303,13 @@ news, so a line rising before Day 0 means prices moved the news' way before it w
 <p class="note">Ranked by signed pre-CAR z. A high value on its own is not proof of insider trading; check the
 filing and the press coverage.</p>
 {_top_events(clean)}
+
+<h2>Directional option flow: leads to investigate</h2>
+<p class="note">Unscheduled news where front-month out-of-the-money volume on the side that profits from the news
+(calls before good news, puts before bad) was significant (z &ge; {config.SIGNIFICANCE_Z}) and above the wrong
+side, ranked by the gap. These are statistical leads, not findings of wrongdoing: check the filing, earlier press
+coverage and SEBI orders for each.</p>
+{_otm_leads(otm_ranked if otm_ranked is not None else pd.DataFrame())}
 
 <h2>Caveats</h2>
 <ul class="caveats">{''.join(f'<li>{html.escape(c)}</li>' for c in caveats)}</ul>

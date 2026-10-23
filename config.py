@@ -114,13 +114,21 @@ PLACEBO_BOOTSTRAP = 2000
 EXTRA_SIGNAL_COLUMNS = {
     "fut_oi_chg_pre": "Fut OI chg",
     "opt_vol_z": "Option vol z",
-    "signed_call_skew_z": "Signed call skew z",
+    "opt_oi_chg_pre": "Option OI chg",
+    "signed_oi_tilt": "Signed call-put OI tilt",
+    "signed_call_skew_z": "Signed call vol skew z",
+    "news_side_otm_vol_z": "OTM news-side vol z",
+    "wrong_side_otm_vol_z": "OTM wrong-side vol z",
     "deal_any": "Block/bulk deal share",
     "deal_value_cr": "Deal value Rs cr",
     "signed_intra_ar_z": "Signed intraday pre-AR z",
     "intra_vol_z": "Intraday pre-vol z",
 }
 DEALS_WINDOW = (-30, -1)   # sessions before Day 0 scanned for bulk/block deals
+# Options at least this far out of the money (strike vs that day's underlying) count as OTM. Informed
+# traders favour cheap short-dated OTM contracts (Augustin, Brenner & Subrahmanyam), so OTM flow is
+# measured on each stock's front (nearest) expiry only.
+OTM_MIN_MONEYNESS = 0.02
 
 # Intraday test (filings released during market hours): the minutes just before the filing vs the same
 # clock window on prior sessions.
