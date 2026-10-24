@@ -483,10 +483,18 @@ def _lead_section(lead: dict) -> str:
         "Signed pre CAR": [_pct(ev["signed_pre_car"])], "Day-0 AR": [_pct(ev["day0_ar"])],
         "Post CAR": [_pct(ev["post_car"])],
     })
+    flags = [label for col, label in [("macro_shock", "big market day in pre-window"),
+                                      ("sector_shock", "big sector day in pre-window"),
+                                      ("broker_prior", "broker rating/target change before filing"),
+                                      ("media_prior", "matching press before filing day")]
+             if col in ev and str(ev[col]) == "True"]  # CSV round-trips store booleans as text
+    if "Media Clarification" in str(ev["event_type"]):
+        flags.append("exchange query about a media report")
     parts = [f'<h2 id="{html.escape(lead["anchor"])}">{html.escape(ev["symbol"])} &middot; '
              f'Day 0 {ev["day0"]:%Y-%m-%d}</h2>',
              f'<p class="lede">{html.escape(str(ev["headline"]))}</p>',
-             _table(facts, set(facts.columns[4:]))]
+             _table(facts, set(facts.columns[4:])),
+             f'<p class="note">Public catalysts detected: {html.escape(", ".join(flags)) if flags else "none"}</p>']
 
     days = lead["days"]
     if len(days):
@@ -522,6 +530,48 @@ def _lead_section(lead: dict) -> str:
                   "prices.</p>", _table(t, set(t.columns[1:]))]
     else:
         parts.append("<p>No news-side OTM contract traded in the pre-window.</p>")
+
+    mins = lead.get("minutes") or []
+    if mins:
+        parts.append("<h3>When were they bought? (1-minute data)</h3><p class=\"note\">Upstox 1-minute bars from "
+                     "t-5 up to the public time. A large share in the first 15 minutes of a session points to a "
+                     "reaction to overnight public news; a large share in the last hour before the filing points "
+                     "to positioning just ahead of it.</p>")
+        for m in mins:
+            sess = ", ".join(f"{d:%m-%d}: {v:,.0f}" for d, v in m["by_session"].items())
+            top = pd.DataFrame({"Minute (IST)": m["top_minutes"].index.strftime("%Y-%m-%d %H:%M"),
+                                "Contracts": m["top_minutes"]["contracts"].map(_int),
+                                "Premium": m["top_minutes"]["close"].map(lambda v: f"{v:.2f}")})
+            parts += [f"<p><strong>{html.escape(m['label'])}</strong> &middot; {m['total_contracts']:,.0f} contracts "
+                      f"before the news &middot; first 15 min of sessions: {m['opening_share']:.0%} &middot; "
+                      f"last 60 trading min before the news: {m['last_hour_share']:.0%}<br>"
+                      f"<span class=\"note\">By session: {html.escape(sess)}</span></p>", _table(top, {"Contracts", "Premium"})]
+
+    ins = lead.get("insider")
+    parts.append(f"<h3>Reported insider trades, {-config.INSIDER_WINDOW[0]} sessions before Day 0</h3>")
+    if lead.get("insider_error"):
+        parts.append(f"<p class=\"note\">Insider data failed: {html.escape(lead['insider_error'])}</p>")
+    elif ins is not None and len(ins):
+        it = pd.DataFrame({"Category": ins["category"], "Side": ins["kind"], "Trades": ins["trades"].map(_int),
+                           "Value (Rs cr)": (ins["value"] / 1e7).map(lambda v: f"{v:,.2f}")})
+        parts += ["<p class=\"note\">SEBI PIT disclosures via BSE, by trade date. Names are not shown.</p>",
+                  _table(it, {"Trades", "Value (Rs cr)"})]
+    else:
+        parts.append("<p>No reported insider trades in the window.</p>")
+
+    so = lead.get("sebi")
+    parts.append("<h3>SEBI enforcement orders mentioning the company</h3>")
+    if lead.get("sebi_error"):
+        parts.append(f"<p class=\"note\">SEBI search failed: {html.escape(lead['sebi_error'])}</p>")
+    elif so is not None and len(so):
+        rel = so[so["relevant"]]
+        rows = "".join(f'<li>{d:%Y-%m-%d} &middot; <a href="{html.escape(u)}">{html.escape(t[:150])}</a></li>'
+                       for d, t, u in zip(rel["date"], rel["title"], rel["url"]))
+        parts.append(f"<p class=\"note\">{len(so)} orders match the company name; {len(rel)} concern insider "
+                     "trading or leaked price-sensitive information. Orders usually come one to three years after "
+                     "the trades, so none may exist yet for this event.</p>" + (f"<ul>{rows}</ul>" if rows else ""))
+    else:
+        parts.append("<p>No orders found.</p>")
 
     f = lead["filings"]
     parts.append("<h3>Exchange filings around the event</h3>")

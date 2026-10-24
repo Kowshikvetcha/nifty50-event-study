@@ -1,7 +1,7 @@
 """BSE corporate announcements: fetch, timestamp-parse and filter for material catalysts."""
 import re
 import time
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import requests
@@ -72,6 +72,17 @@ class BSEScraper:
         if use_cache and cache_file.exists():
             df = pd.read_csv(cache_file, parse_dates=["timestamp"], keep_default_na=False)
             return df.astype({"critical": bool})
+        rows, start = [], from_date
+        while start <= to_date:  # the API silently returns nothing for ranges longer than a year
+            end = min(to_date, start + timedelta(days=config.BSE_MAX_DAYS_PER_REQUEST - 1))
+            rows += self._fetch_range(scrip_code, start, end)
+            start = end + timedelta(days=1)
+        df = self._normalise(rows)
+        df.to_csv(cache_file, index=False)
+        return df
+
+    def _fetch_range(self, scrip_code: int, from_date: date, to_date: date) -> list[dict]:
+        """Every page of announcements for one range of at most a year."""
         rows, page, total = [], 1, None
         while True:
             params = {
@@ -79,17 +90,7 @@ class BSEScraper:
                 "strScrip": scrip_code,
                 "strPrevDate": from_date.strftime("%Y%m%d"), "strToDate": to_date.strftime("%Y%m%d"),
             }
-            for attempt in range(3):  # retry dropped connections; panel runs make hundreds of calls
-                try:
-                    resp = self.session.get(config.BSE_ANNOUNCEMENTS_URL, params=params, timeout=30)
-                    break
-                except (requests.ConnectionError, requests.Timeout):
-                    if attempt == 2:
-                        raise
-                    time.sleep(2 ** attempt)
-            if resp.status_code != 200 or not resp.headers.get("Content-Type", "").startswith("application/json"):
-                raise RuntimeError(f"BSE API returned {resp.status_code}: {resp.text[:200]}")
-            payload = resp.json()
+            payload = self._get(config.BSE_ANNOUNCEMENTS_URL, params).json()
             batch = payload.get("Table") or []
             if total is None and payload.get("Table1"):
                 total = payload["Table1"][0].get("ROWCNT")
@@ -100,9 +101,53 @@ class BSEScraper:
                 break
             page += 1
             time.sleep(config.BSE_REQUEST_PAUSE_SEC)
-        df = self._normalise(rows)
+        return rows
+
+    def get_insider_trades(self, scrip_code: int, from_date: date, to_date: date) -> pd.DataFrame:
+        """SEBI PIT insider trades (system-driven disclosures) for a scrip, cached per range.
+
+        Source: BSE `sddpit`, which is complete where NSE's corporates-pit feed returns nothing (e.g. 1,848
+        HDFC Bank rows in a year against NSE's zero). Person names are dropped here and never stored.
+        """
+        cache_file = config.CACHE_DIR / f"bse_pit_{scrip_code}_{from_date}_{to_date}.csv"
+        cols = ["category", "kind", "shares", "value", "trade_from", "trade_to", "reported"]
+        if cache_file.exists():
+            return pd.read_csv(cache_file, parse_dates=["trade_from", "trade_to", "reported"])
+        rows, start = [], from_date
+        while start <= to_date:  # ranges are chunked to a year, like the other exchange APIs
+            end = min(to_date, start + timedelta(days=364))
+            resp = self._get(config.BSE_PIT_URL, {"scripcode": scrip_code, "fromdt": f"{start:%Y%m%d}",
+                                                  "todt": f"{end:%Y%m%d}"})
+            rows += resp.json().get("Table") or []
+            start = end + timedelta(days=1)
+            time.sleep(config.BSE_REQUEST_PAUSE_SEC)
+        out = []
+        for r in rows:
+            for kind, n, v in (("buy", r.get("Buy_No_OF_Shares"), r.get("Buy_Value_Securities")),
+                               ("sell", r.get("Sell_No_OF_Shares"), r.get("Sell_Value_Securities"))):
+                if n:  # pledge-only rows carry neither and are skipped
+                    out.append({"category": r.get("Category") or "", "kind": kind, "shares": float(n),
+                                "value": float(v or 0), "trade_from": r.get("Transaction_Date_From"),
+                                "trade_to": r.get("Transaction_Date_To"), "reported": r.get("Report_Creation_Date")})
+        df = pd.DataFrame(out, columns=cols)
+        for c in ("trade_from", "trade_to", "reported"):
+            df[c] = pd.to_datetime(df[c])
         df.to_csv(cache_file, index=False)
         return df
+
+    def _get(self, url: str, params: dict) -> requests.Response:
+        """GET that retries dropped connections and insists on JSON (BSE serves HTML error pages)."""
+        for attempt in range(3):
+            try:
+                resp = self.session.get(url, params=params, timeout=60)
+                break
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+        if resp.status_code != 200 or not resp.headers.get("Content-Type", "").startswith("application/json"):
+            raise RuntimeError(f"BSE API returned {resp.status_code}: {resp.text[:200]}")
+        return resp
 
     @staticmethod
     def _normalise(rows: list[dict]) -> pd.DataFrame:

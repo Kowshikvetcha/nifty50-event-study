@@ -16,17 +16,18 @@ import requests
 
 import config
 import report
-from event_study import (build_events, earliest_exchange_time, generic_words, leakage_tests, media_lead,
-                         placebo_events, rank_directional_otm, run_event_study, summarise)
+from event_study import (broker_action, build_events, earliest_exchange_time, generic_words, leakage_tests,
+                         media_lead, placebo_events, rank_directional_otm, run_event_study, summarise)
 from media_client import MediaClient, MediaError, company_query
 from news_scraper import BSEScraper
 from nse_client import NSEClient, NSEError
 from upstox_client import UpstoxClient, UpstoxError
 
 OUTPUT_DIR = config.BASE_DIR / "output"
-SIGNALS = ("fno", "deals", "intraday", "media")  # optional per-event signal families
-# media is opt-in: Google News returns different result sets for the same query between runs.
-DEFAULT_SIGNALS = ("fno", "deals", "intraday")
+SIGNALS = ("fno", "deals", "intraday", "insider", "media")  # optional per-event signal families
+# media (press and broker-action searches) is opt-in: Google News returns different result sets for the
+# same query between runs.
+DEFAULT_SIGNALS = ("fno", "deals", "intraday", "insider")
 
 
 def pct(x, nd=2):
@@ -82,6 +83,19 @@ def tests_table(results: pd.DataFrame, placebo: pd.DataFrame) -> pd.DataFrame:
         "Unscheduled (non-ovl)": clean[~clean["scheduled"]],
         "Scheduled (non-ovl)": clean[clean["scheduled"]],
     }
+    # The cleanest test: unscheduled news with no public catalyst we can see in the pre-window (no big market
+    # or sector day, no exchange query about a media report, and with `media` no earlier press or broker call).
+    unsched = clean[~clean["scheduled"]]
+    # Merged events keep one label, so a same-day clarification can hide behind another type: check both.
+    clarif = unsched["event_type"].str.contains("Media Clarification") | \
+        unsched["headline"].str.contains("clarification sought", case=False)
+    quiet = ~unsched["macro_shock"].astype(bool) & ~clarif
+    if "sector_shock" in unsched:  # missing = no sector index for the stock, not a shock
+        quiet &= ~unsched["sector_shock"].fillna(False).astype(bool)
+    for col in ("media_prior", "broker_prior"):  # missing = search failed, so the event can't count as quiet
+        if col in unsched:
+            quiet &= unsched[col].astype(str) == "False"
+    groups["Unsched, no public catalyst"] = unsched[quiet]
     if "media_prior" in clean:
         # Leakage through the press vs no public trace before the filing (the stronger insider signal).
         unsched = clean[~clean["scheduled"]]
@@ -148,7 +162,7 @@ def resolve_universe(args, upstox: UpstoxClient, nse: NSEClient) -> list[tuple[s
 
 
 def study_stock(sym: str, key: str, scrip: int, args, upstox: UpstoxClient, nse: NSEClient,
-                media: MediaClient, market: pd.DataFrame,
+                media: MediaClient, market: pd.DataFrame, sector_key: str | None,
                 news_from: date, price_from: date, today: date, rng: np.random.Generator,
                 verbose: bool) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Events, placebo days and raw filings for one stock."""
@@ -180,6 +194,22 @@ def study_stock(sym: str, key: str, scrip: int, args, upstox: UpstoxClient, nse:
                 print(f"F&O ({args.oi_source}): {fo['date'].nunique()} sessions")
         except (UpstoxError, NSEError) as e:
             print(f"  {sym}: F&O skipped: {e}")
+    sector = None
+    if sector_key:
+        try:
+            sector = upstox.get_daily_candles(sector_key, price_from, today)
+            if verbose:
+                print(f"Sector benchmark: {sector_key}")
+        except UpstoxError as e:
+            print(f"  {sym}: sector index skipped: {e}")
+    insider = None
+    if "insider" in args.signals:
+        try:
+            insider = scraper.get_insider_trades(scrip, price_from, today)
+            if verbose:
+                print(f"Insider trades (SEBI PIT via BSE): {len(insider)}")
+        except (RuntimeError, requests.RequestException) as e:
+            print(f"  {sym}: insider trades skipped: {e}")
     deals = None
     if "deals" in args.signals:
         try:
@@ -206,7 +236,7 @@ def study_stock(sym: str, key: str, scrip: int, args, upstox: UpstoxClient, nse:
         except UpstoxError as e:
             print(f"  {sym}: intraday skipped: {e}")
 
-    signals = {"fo": fo, "deals": deals, "intraday": intraday}
+    signals = {"fo": fo, "deals": deals, "intraday": intraday, "insider": insider, "sector": sector}
     results = run_event_study(events, stock, market, verbose=verbose, **signals)
     placebo = run_event_study(pl_events, stock, market, verbose=False, **signals)
 
@@ -225,12 +255,25 @@ def study_stock(sym: str, key: str, scrip: int, args, upstox: UpstoxClient, nse:
         generic = generic_words(pd.concat([a["title"] for a in searched.values()])) if searched else set()
         found = [media_lead(searched[i], company, ev.headline, ev.timestamp, generic) if i in searched else {}
                  for i, ev in zip(results.index, results.itertuples())]
+        broker = {}
+        for ev in results[~results["scheduled"]].itertuples():
+            day = ev.timestamp.date()
+            try:
+                broker[ev.Index] = broker_action(
+                    media.search_broker(company, day - timedelta(days=config.MEDIA_LOOKBACK_DAYS), day), ev.timestamp,
+                    (sym, company.split()[0]))
+            except (MediaError, requests.RequestException) as e:
+                print(f"  {sym}: broker search stopped: {e}")
+                break
         media_cols = pd.DataFrame(found, index=results.index,
                                   columns=["media_prior_n", "media_lead_days", "media_prior"])
-        results = pd.concat([results, media_cols], axis=1)
+        broker_cols = pd.DataFrame([broker.get(i, {}) for i in results.index], index=results.index,
+                                   columns=["broker_prior", "broker_prior_n"])
+        results = pd.concat([results, media_cols, broker_cols], axis=1)
         if verbose:
             print(f"Media: {int(results['media_prior'].fillna(False).sum())} unscheduled events "
-                  f"had matching coverage on an earlier day")
+                  f"had matching coverage on an earlier day, {int(results['broker_prior'].fillna(False).sum())} "
+                  f"a broker rating or target change")
 
     for df in (results, placebo):
         if len(df):
@@ -277,12 +320,18 @@ def main() -> int:
     print(f"Pre-Event Drift & Information Leakage | {label} | {news_from} -> {today}")
     print(f"Upstox auth: {'token' if upstox.has_token else 'none (public historical endpoint)'}")
     market = upstox.get_daily_candles(config.MARKET_INDEX_KEY, price_from, today)
+    try:  # industry per symbol picks each stock's sector benchmark
+        industry = dict(zip(*nse.get_nifty50()[["symbol", "industry"]].T.values))
+    except (NSEError, requests.RequestException):
+        industry = {}
 
     rng = np.random.default_rng(config.PLACEBO_SEED)
     all_res, all_placebo, all_filings = [], [], {}
     for n, (sym, key, scrip) in enumerate(stocks, 1):
         try:
             res, pl, filings = study_stock(sym, key, scrip, args, upstox, nse, media, market,
+                                           config.SECTOR_INDEX_OVERRIDES.get(sym)
+                                           or config.SECTOR_INDEX.get(industry.get(sym)),
                                            news_from, price_from, today, rng, verbose=single)
         except (RuntimeError, requests.RequestException) as e:
             print(f"[{n}/{len(stocks)}] {sym:<12} FAILED: {e}")

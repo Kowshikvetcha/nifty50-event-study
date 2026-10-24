@@ -14,15 +14,17 @@ import requests
 
 import config
 import report
-from event_study import keywords, option_flow_by_day, prepare_prices, top_contracts
+from event_study import keywords, minute_profile, option_flow_by_day, prepare_prices, top_contracts
 from media_client import MediaClient, MediaError, company_query
 from news_scraper import BSEScraper
 from nse_client import NSEClient, NSEError
+from sebi_client import SebiClient, SebiError
 from upstox_client import UpstoxClient, UpstoxError
 
 OUTPUT_DIR = config.BASE_DIR / "output"
 PRESS_LOOKBACK_DAYS = 10
 PRESS_OTHER_ROWS = 15
+MINUTE_CONTRACTS = 3  # top news-side contracts given a 1-minute trading profile
 
 
 def _latest(pattern: str):
@@ -59,7 +61,7 @@ def press_timeline(media: MediaClient, company: str, ev: pd.Series) -> pd.DataFr
     return pd.concat([arts[arts["match"]].sort_values("date"), others])
 
 
-def drill(ev: pd.Series, upstox: UpstoxClient, nse: NSEClient, media: MediaClient) -> dict:
+def drill(ev: pd.Series, upstox: UpstoxClient, nse: NSEClient, media: MediaClient, sebi: SebiClient) -> dict:
     sym, day0 = ev["symbol"], ev["day0"]
     key = upstox.get_instrument_key(sym)
     span_from = (day0 - timedelta(days=config.LOOKBACK_BUFFER_DAYS)).date()
@@ -76,8 +78,11 @@ def drill(ev: pd.Series, upstox: UpstoxClient, nse: NSEClient, media: MediaClien
         strikes = nse.get_option_strikes(sym, window)
         lead["days"] = option_flow_by_day(strikes, px, day0, ev["direction"])
         lead["contracts"] = top_contracts(strikes, sessions, day0, ev["direction"])
+        lead["contracts"].attrs["side"] = "CE" if ev["direction"] > 0 else "PE"
     except NSEError as e:
         print(f"  {sym}: options skipped: {e}")
+
+    lead["minutes"] = contract_minutes(lead["contracts"], key, sessions, day0, ev["timestamp"], upstox)
 
     scrip = config.SAMPLE_STOCKS.get(sym) or upstox.get_bse_scrip(key)
     scraper = BSEScraper()
@@ -91,7 +96,51 @@ def drill(ev: pd.Series, upstox: UpstoxClient, nse: NSEClient, media: MediaClien
         lead["press"] = press_timeline(media, company, ev)
     except (MediaError, requests.RequestException) as e:
         lead["press_error"] = str(e)
+
+    # Reported insider trades by trade date in the INSIDER_WINDOW sessions before Day 0 (categories only).
+    lo, hi = config.INSIDER_WINDOW
+    try:
+        pit = scraper.get_insider_trades(scrip, sessions[max(i + lo, 0)].date(), sessions[i + hi].date())
+        lead["insider"] = pit.groupby(["category", "kind"]).agg(trades=("value", "size"), value=("value", "sum")) \
+            .reset_index()
+    except (RuntimeError, requests.RequestException) as e:
+        lead["insider_error"] = str(e)
+
+    try:
+        # Company name only: a symbol like RELIANCE also matches other group companies' orders. SEBI's title
+        # search is literal, so spelling variants ("Dr. Reddy's" vs "Dr Reddys") can miss orders.
+        orders = sebi.search_orders(company)
+        orders = orders.drop_duplicates("url").sort_values("date", ascending=False)
+        lead["sebi"] = orders.assign(relevant=orders["title"].str.contains(config.SEBI_RELEVANT_PATTERN, case=False))
+    except (SebiError, requests.RequestException) as e:
+        lead["sebi_error"] = str(e)
     return lead
+
+
+def contract_minutes(contracts: pd.DataFrame, key: str, sessions: pd.DatetimeIndex, day0: pd.Timestamp,
+                     public_ts: pd.Timestamp, upstox: UpstoxClient) -> list[dict]:
+    """1-minute trading profile of the top news-side contracts (Upstox expired-instrument data, Plus plan)."""
+    out = []
+    if contracts.empty:
+        return out
+    i = sessions.get_loc(day0)
+    start = sessions[i + config.PRE_WINDOW[0]].date()
+    side = "CE" if contracts.attrs.get("side", "CE") == "CE" else "PE"
+    for c in contracts.head(MINUTE_CONTRACTS).itertuples():
+        expiry = f"{c.expiry:%Y-%m-%d}"
+        try:
+            listing = upstox.get_expired_option_contracts(key, expiry)
+            hit = listing[(listing["strike_price"] == c.strike) & (listing["instrument_type"] == side)]
+            if hit.empty:
+                continue
+            bars = upstox.get_expired_minutes(hit.iloc[0]["instrument_key"], start, day0.date())
+        except UpstoxError as e:
+            print(f"  minute data skipped for {c.strike:g} {side} {expiry}: {e}")
+            continue
+        prof = minute_profile(bars, float(hit.iloc[0]["lot_size"]), public_ts)
+        if prof:
+            out.append({"label": f"{c.strike:g} {side} {expiry}", **prof})
+    return out
 
 
 def main() -> int:
@@ -104,12 +153,12 @@ def main() -> int:
         ap.error("--symbol and --day0 go together")
 
     events, source = load_leads(args)
-    upstox, nse, media = UpstoxClient(), NSEClient(), MediaClient()
+    upstox, nse, media, sebi = UpstoxClient(), NSEClient(), MediaClient(), SebiClient()
     leads = []
     for n, (_, ev) in enumerate(events.iterrows(), 1):
         print(f"[{n}/{len(events)}] {ev['symbol']} {ev['day0']:%Y-%m-%d}")
         try:
-            leads.append(drill(ev, upstox, nse, media))
+            leads.append(drill(ev, upstox, nse, media, sebi))
         except (UpstoxError, NSEError, RuntimeError, requests.RequestException) as e:
             print(f"  FAILED: {e}")
     if not leads:

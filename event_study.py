@@ -115,6 +115,20 @@ def media_lead(articles: pd.DataFrame, company: str, headline: str, filing_ts: p
     return {"media_prior_n": len(prior), "media_lead_days": lead, "media_prior": len(prior) > 0}
 
 
+def broker_action(articles: pd.DataFrame, filing_ts: pd.Timestamp, names: tuple[str, ...]) -> dict:
+    """Broker rating changes or target revisions in the press on a day before the filing (a public catalyst).
+
+    The title must name the company (`names`: e.g. symbol and first word of the name), since broker-roundup
+    searches return calls on other stocks too.
+    """
+    if articles.empty:
+        return {"broker_prior": False, "broker_prior_n": 0}
+    named = articles["title"].str.contains("|".join(rf"\b{re.escape(n)}\b" for n in names), case=False, regex=True)
+    hit = articles[named & articles["title"].str.contains(config.BROKER_PATTERN, case=False, regex=True)
+                   & (articles["date"] < filing_ts.normalize())]
+    return {"broker_prior": len(hit) > 0, "broker_prior_n": len(hit)}
+
+
 def build_events(announcements: pd.DataFrame, trading_days: pd.DatetimeIndex) -> pd.DataFrame:
     """Attach Day 0 to each filing and merge filings that share the same Day 0."""
     if announcements.empty:
@@ -139,12 +153,17 @@ def build_events(announcements: pd.DataFrame, trading_days: pd.DatetimeIndex) ->
     return df.groupby("day0").apply(merge, include_groups=False).reset_index()
 
 
-def prepare_prices(stock: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
+def prepare_prices(stock: pd.DataFrame, market: pd.DataFrame, sector: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Daily returns and abnormal returns vs Nifty 50; with a sector index also `sec_ar` = stock − sector."""
     px = pd.DataFrame({"close": stock["close"], "volume": stock["volume"]}).join(
         market["close"].rename("mkt_close"), how="inner")
     px["ret"] = px["close"].pct_change()
     px["mkt_ret"] = px["mkt_close"].pct_change()
     px["ar"] = px["ret"] - px["mkt_ret"]
+    if sector is not None:
+        px = px.join(sector["close"].rename("sec_close"), how="left")
+        px["sec_ret"] = px["sec_close"].pct_change()
+        px["sec_ar"] = px["ret"] - px["sec_ret"]
     return px
 
 
@@ -180,6 +199,14 @@ def measure_event(px: pd.DataFrame, day0: pd.Timestamp) -> dict:
     out["vol_ratio"] = pre["volume"].mean() / vol_mu
     out["vol_z"] = (pre["volume"].mean() - vol_mu) / vol_sd if vol_sd > 0 else np.nan
     out["vol_peak_z"] = ((pre["volume"] - vol_mu) / vol_sd).max() if vol_sd > 0 else np.nan
+    # Public catalysts that are not company filings: a big market day, or a big sector-only day, inside the
+    # pre-window would move the stock without anyone knowing the company news.
+    out["macro_shock"] = bool((pre["mkt_ret"].abs() >= config.MACRO_SHOCK_RET).any())
+    if "sec_ar" in px and pre["sec_ret"].notna().all():
+        out["sector_shock"] = bool(((pre["sec_ret"] - pre["mkt_ret"]).abs() >= config.SECTOR_SHOCK_RET).any())
+        sec_sd = base["sec_ar"].std(ddof=1)
+        out["sector_pre_car"] = pre["sec_ar"].sum()
+        out["sector_pre_car_z"] = out["sector_pre_car"] / (sec_sd * np.sqrt(n_pre)) if sec_sd > 0 else np.nan
 
     out["day0_ar"] = px["ar"].iloc[i]
     out["day0_z"] = out["day0_ar"] / ar_sd if ar_sd > 0 else np.nan
@@ -332,6 +359,22 @@ def measure_intraday(bars: pd.DataFrame, mkt_bars: pd.DataFrame, ts: pd.Timestam
     }
 
 
+def measure_insider(pit: pd.DataFrame, trading_days: pd.DatetimeIndex, day0: pd.Timestamp) -> dict:
+    """Reported insider (SEBI PIT) trades whose trade date falls in INSIDER_WINDOW sessions before Day 0.
+
+    Disclosures are filed days after the trade (median ~6 in testing), so this uses the trade date, which
+    is what matters for "did insiders trade before the news". Net value is signed by news direction later.
+    """
+    i = trading_days.get_loc(day0)
+    lo, hi = config.INSIDER_WINDOW
+    if i + lo < 0:
+        return {}
+    hit = pit[(pit["trade_from"] >= trading_days[i + lo]) & (pit["trade_from"] <= trading_days[i + hi])]
+    buy = hit.loc[hit["kind"] == "buy", "value"].sum()
+    sell = hit.loc[hit["kind"] == "sell", "value"].sum()
+    return {"insider_any": float(len(hit) > 0), "insider_trades": len(hit), "insider_net_cr": (buy - sell) / 1e7}
+
+
 def classify_outcome(pre_car: float, post_car: float, flat: float = 0.005) -> str:
     if pd.isna(post_car):
         return "Pending (<5d)"
@@ -369,6 +412,12 @@ def add_direction_metrics(res: pd.DataFrame) -> pd.DataFrame:
         res["news_side_otm_vol_z"] = res["otm_ce_vol_z"].where(good, res["otm_pe_vol_z"])
         res["wrong_side_otm_vol_z"] = res["otm_pe_vol_z"].where(good, res["otm_ce_vol_z"])
         res.loc[res["direction"] == 0, ["signed_oi_tilt", "news_side_otm_vol_z", "wrong_side_otm_vol_z"]] = np.nan
+    if "sector_pre_car" in res:
+        # Same news direction (from the Nifty-adjusted reaction); only the benchmark changes.
+        res["sector_signed_pre_car"] = res["direction"] * res["sector_pre_car"]
+    if "insider_net_cr" in res:
+        # Insiders net-buying before good news (or net-selling before bad) is > 0.
+        res["insider_net_signed_cr"] = res["direction"] * res["insider_net_cr"]
     if "intra_pre_ar_z" in res:
         # Day-0 AR would include the pre-filing minutes themselves; sign by the reaction after the filing.
         intra_dir = np.sign(res["intra_post_ar"] + res["post_car"].fillna(0))
@@ -467,6 +516,29 @@ def top_contracts(strikes: pd.DataFrame, sessions: pd.DatetimeIndex, day0: pd.Ti
     return out.sort_values("pre_vol", ascending=False).head(n).reset_index(drop=True) if len(out) else out
 
 
+def minute_profile(minutes: pd.DataFrame, lot: float, public_ts: pd.Timestamp, n_top: int = 5) -> dict:
+    """When were a contract's pre-news lots bought? 1-minute bars up to the public time.
+
+    Returns contracts per session, the share bought in the last 60 trading minutes before the news and in the
+    first 15 minutes of each session (a gap-open reaction to overnight public news), and the busiest minutes.
+    """
+    before = minutes[minutes.index < public_ts.floor("min")]
+    if before.empty or before["volume"].sum() <= 0:
+        return {}
+    lots = before["volume"] / lot
+    total = lots.sum()
+    t = before.index
+    opening = (t.hour == config.MARKET_OPEN.hour) & (t.minute < config.MARKET_OPEN.minute + 15)
+    top = before.assign(contracts=lots).nlargest(n_top, "volume")[["contracts", "close"]]
+    return {
+        "by_session": lots.groupby(t.normalize()).sum(),
+        "last_hour_share": lots.iloc[-60:].sum() / total,
+        "opening_share": lots[opening].sum() / total,
+        "top_minutes": top,
+        "total_contracts": total,
+    }
+
+
 def placebo_events(trading_days: pd.DatetimeIndex, event_day0s: list, n: int,
                    rng: np.random.Generator) -> pd.DataFrame:
     """Random non-event sessions, at least PLACEBO_MIN_GAP sessions from any event and from each other."""
@@ -489,8 +561,10 @@ def placebo_events(trading_days: pd.DatetimeIndex, event_day0s: list, n: int,
 def run_event_study(events: pd.DataFrame, stock: pd.DataFrame, market: pd.DataFrame,
                     verbose: bool = True, fo: pd.DataFrame | None = None,
                     deals: pd.DataFrame | None = None,
-                    intraday: tuple[pd.DataFrame, pd.DataFrame] | None = None) -> pd.DataFrame:
-    px = prepare_prices(stock, market)
+                    intraday: tuple[pd.DataFrame, pd.DataFrame] | None = None,
+                    insider: pd.DataFrame | None = None,
+                    sector: pd.DataFrame | None = None) -> pd.DataFrame:
+    px = prepare_prices(stock, market, sector)
     fo_d = fo_daily(fo) if fo is not None else None  # fo is long-format (see measure_fno)
     rows = []
     day0s = list(events["day0"]) if not events.empty else []
@@ -510,10 +584,11 @@ def run_event_study(events: pd.DataFrame, stock: pd.DataFrame, market: pd.DataFr
         overlap = any(lo <= d <= hi and d != ev.day0 for d in day0s)
         fno = measure_fno(fo, fo_d, ev.day0) if fo is not None else {}
         dl = measure_deals(deals, px.index, ev.day0) if deals is not None else {}
+        ins = measure_insider(insider, px.index, ev.day0) if insider is not None else {}
         # Only filings released in-session on Day 0 itself have a well-defined "minutes before".
         intra = (measure_intraday(*intraday, ev.timestamp)
                  if intraday is not None and ev.timestamp.normalize() == ev.day0 else {})
-        rows.append({**ev._asdict(), **m, **fno, **dl, **intra, "overlap": overlap})
+        rows.append({**ev._asdict(), **m, **fno, **dl, **ins, **intra, "overlap": overlap})
 
     res = pd.DataFrame(rows)
     if res.empty:

@@ -69,9 +69,18 @@ MEDIA_MIN_KEYWORDS = 2      # title must share this many distinctive headline ke
 MEDIA_MAX_DOC_FREQ = 0.02   # words in more of a company's headlines than this are generic, not evidence
 MEDIA_PAUSE_SEC = 1.0
 
+# --- SEBI enforcement orders (drill-down cross-check) ---------------------------------
+SEBI_ORDERS_LISTING_URL = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=2&s=0&smid=0&ssid=9"
+SEBI_ORDERS_AJAX_URL = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
+SEBI_MAX_PAGES = 8          # 25 orders per page
+# Titles that point at leaked information rather than other enforcement (registration, fees, appeals).
+SEBI_RELEVANT_PATTERN = r"insider|unpublished price sensitive|upsi|front.?running"
+
 # --- BSE endpoints ------------------------------------------------------------
 BSE_ANNOUNCEMENTS_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
 BSE_ATTACHMENT_URL = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/{name}"
+# SEBI PIT system-driven disclosures (insider trades); found in the BSE site's JS bundle (Getquote "SDD PIT" tab).
+BSE_PIT_URL = "https://api.bseindia.com/BseIndiaAPI/api/sddpit/w"
 BSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -83,6 +92,7 @@ BSE_HEADERS = {
     "Origin": "https://www.bseindia.com",
 }
 BSE_PAGE_SIZE = 50
+BSE_MAX_DAYS_PER_REQUEST = 365  # longer ranges return no rows at all (no error), so requests are chunked
 BSE_REQUEST_PAUSE_SEC = 0.5
 
 # --- Market session (IST) -----------------------------------------------------
@@ -121,6 +131,9 @@ EXTRA_SIGNAL_COLUMNS = {
     "wrong_side_otm_vol_z": "OTM wrong-side vol z",
     "deal_any": "Block/bulk deal share",
     "deal_value_cr": "Deal value Rs cr",
+    "insider_any": "Insider trade share",
+    "insider_net_signed_cr": "Insider net, news-signed Rs cr",
+    "sector_signed_pre_car": "Sector-adj signed pre CAR",
     "signed_intra_ar_z": "Signed intraday pre-AR z",
     "intra_vol_z": "Intraday pre-vol z",
 }
@@ -129,6 +142,40 @@ DEALS_WINDOW = (-30, -1)   # sessions before Day 0 scanned for bulk/block deals
 # traders favour cheap short-dated OTM contracts (Augustin, Brenner & Subrahmanyam), so OTM flow is
 # measured on each stock's front (nearest) expiry only.
 OTM_MIN_MONEYNESS = 0.02
+INSIDER_WINDOW = (-30, -1)  # sessions before Day 0 scanned for reported insider (PIT) trades, by trade date
+
+# --- Public catalysts that are not company filings (controls) --------------------
+# A pre-window day this big for the market, or for the sector relative to the market, is public news that
+# can move the stock without anyone knowing the company's own news.
+MACRO_SHOCK_RET = 0.02
+SECTOR_SHOCK_RET = 0.02
+# Sector benchmark per NSE industry (from the Nifty 50 list); symbols below override it. The stock is part of
+# its own sector index, which biases sector-adjusted returns slightly towards zero for the heaviest weights.
+SECTOR_INDEX = {
+    "Financial Services": "NSE_INDEX|Nifty Fin Service",
+    "Healthcare": "NSE_INDEX|NIFTY HEALTHCARE",
+    "Automobile and Auto Components": "NSE_INDEX|Nifty Auto",
+    "Metals & Mining": "NSE_INDEX|Nifty Metal",
+    "Information Technology": "NSE_INDEX|Nifty IT",
+    "Fast Moving Consumer Goods": "NSE_INDEX|Nifty FMCG",
+    "Oil Gas & Consumable Fuels": "NSE_INDEX|NIFTY OIL AND GAS",
+    "Services": "NSE_INDEX|Nifty Trans Logis",
+    "Consumer Durables": "NSE_INDEX|NIFTY CONSR DURBL",
+    "Consumer Services": "NSE_INDEX|Nifty Consumption",
+    "Construction Materials": "NSE_INDEX|Nifty Cement",
+    "Power": "NSE_INDEX|Nifty Energy",
+    "Capital Goods": "NSE_INDEX|Nifty Ind Defence",
+    "Construction": "NSE_INDEX|Nifty Infra",
+}
+SECTOR_INDEX_OVERRIDES = {s: "NSE_INDEX|Nifty Bank" for s in
+                          ("HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN", "INDUSINDBK")}
+# Broker research in the press before a filing (with `media`): rating changes and target revisions.
+BROKER_QUERY = '"{company}" (upgrade OR downgrade OR "target price" OR "buy rating" OR "sell rating")'
+# A rating *change* or target *revision* (not "check target price" explainers or software "upgrades").
+BROKER_PATTERN = (r"\b(?:upgrade[sd]?|downgrade[sd]?)\b.{0,60}\b(?:rating|buy|sell|hold|overweight|underweight|"
+                  r"neutral|outperform|underperform|add|reduce)\b|\btarget(?: price)?\b.{0,20}\b(?:hike[sd]?|raise[sd]?|"
+                  r"cuts?|lower(?:s|ed)?|lifts?|trims?|slashe[sd])\b|\b(?:hike[sd]?|raise[sd]?|cuts?|lower(?:s|ed)?|"
+                  r"lifts?|trims?|slashe[sd])\b.{0,30}\btarget\b|\binitiates? coverage\b")
 
 # Intraday test (filings released during market hours): the minutes just before the filing vs the same
 # clock window on prior sessions.

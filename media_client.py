@@ -29,14 +29,28 @@ class MediaClient:
 
         Google News returns at most ~100 items per query, so keep ranges short.
         """
+        return self._search(f'"{company}"', "gnews_", company, from_date, to_date)
+
+    def search_broker(self, company: str, from_date: date, to_date: date) -> pd.DataFrame:
+        """Articles about broker rating changes or target revisions for the company (config.BROKER_QUERY)."""
+        return self._search(config.BROKER_QUERY.format(company=company), "gnews_broker_", company, from_date, to_date)
+
+    def _search(self, query: str, prefix: str, company: str, from_date: date, to_date: date) -> pd.DataFrame:
         slug = re.sub(r"\W+", "_", company.lower()).strip("_")
-        cache_file = config.CACHE_DIR / f"gnews_{slug}_{from_date}_{to_date}.csv"
+        cache_file = config.CACHE_DIR / f"{prefix}{slug}_{from_date}_{to_date}.csv"
         if cache_file.exists():
             return pd.read_csv(cache_file, parse_dates=["date"], keep_default_na=False)
         # before: is exclusive in Google's operator syntax
-        q = f'"{company}" after:{from_date:%Y-%m-%d} before:{(pd.Timestamp(to_date) + pd.Timedelta(days=1)):%Y-%m-%d}'
-        resp = self.session.get(config.GOOGLE_NEWS_RSS_URL, timeout=30,
-                                params={"q": q, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+        q = f'{query} after:{from_date:%Y-%m-%d} before:{(pd.Timestamp(to_date) + pd.Timedelta(days=1)):%Y-%m-%d}'
+        for attempt in range(3):  # long runs make ~1,000 searches; Google drops the odd connection
+            try:
+                resp = self.session.get(config.GOOGLE_NEWS_RSS_URL, timeout=30,
+                                        params={"q": q, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+                break
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 2:
+                    raise
+                time.sleep(5 * 2 ** attempt)
         time.sleep(config.MEDIA_PAUSE_SEC)
         if resp.status_code != 200:
             raise MediaError(f"{resp.status_code} from Google News for {company!r}")

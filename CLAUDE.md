@@ -19,7 +19,7 @@ Research pipeline testing whether Nifty 50 stocks move before material news is p
 ## Layout
 
 Flat modules, with `config.py` imported by everything:
-`upstox_client.py` (daily + 1-min prices) · `news_scraper.py` (BSE filings + classifier) · `nse_client.py` (Nifty 50 list, NSE filings, F&O bhavcopy, deals) · `media_client.py` (Google News) · `event_study.py` (pure computation + tests) · `report.py` (HTML rendering) · `drilldown.py` (lead drill-down CLI) · `main.py` (CLI).
+`upstox_client.py` (daily + 1-min prices) · `news_scraper.py` (BSE filings + classifier) · `nse_client.py` (Nifty 50 list, NSE filings, F&O bhavcopy, deals) · `media_client.py` (Google News: press, broker actions) · `sebi_client.py` (SEBI orders) · `event_study.py` (pure computation + tests) · `report.py` (HTML rendering) · `drilldown.py` (lead drill-down CLI) · `main.py` (CLI).
 
 ## Conventions
 
@@ -39,7 +39,7 @@ Flat modules, with `config.py` imported by everything:
 - **Filter changes** (`MATERIAL_RULES`, `ROUTINE_PATTERNS`, `ROUTINE_SUBCATEGORIES` in `news_scraper.py`) must be audited against `output/bse_filings_*.csv` for false positives and negatives. Rule order matters: the first match wins.
 - **Baseline = [t-35, t-6]**, deliberately disjoint from the pre-window. Don't let it overlap.
 - **NSE `/api` endpoints need homepage cookies first** (`NSEClient._api_get`). The deals endpoint truncates at 70 rows and 500s on ranges over a year; `get_large_deals` handles both.
-- **Don't trust NSE PIT (`corporates-pit`)**: it returns zero rows for whole stocks (HDFCBANK, TCS). Insider trades are not wired up for this reason.
+- **Insider trades come from BSE `sddpit`**, never NSE `corporates-pit` (which returns zero rows for whole stocks). Names are dropped at fetch time; keep it that way.
 - **Google News is non-deterministic** for the same query, so `media` is opt-in and experimental. Its pubDates are date-only.
 - **Upstox token**: needed for intraday (v3) and expired futures (also needs the Plus plan). Tokens expire daily; a token issued before a plan upgrade keeps the old entitlements.
 - **F&O defaults to the NSE bhavcopy** (UDiFF format, from Jul-2024 only). `--oi-source upstox` gives near-month futures only, which collapse at each expiry.

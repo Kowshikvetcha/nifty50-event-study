@@ -7,7 +7,8 @@ This is a flat Python script pipeline with no framework or package. Four data-ac
 - `upstox_client.py`: daily and 1-minute prices
 - `news_scraper.py`: BSE filings
 - `nse_client.py`: NSE filings, F&O activity, deals and constituents
-- `media_client.py`: press coverage
+- `media_client.py`: press coverage and broker actions
+- `sebi_client.py`: SEBI enforcement orders (drill-down only)
 
 `event_study.py` is pure computation: it turns those frames into per-event metrics, tests and the leads ranking. `report.py` renders the HTML report and the drill-down page. `main.py` runs one stock or a pooled universe (e.g. all Nifty 50). `drilldown.py` investigates the option-flow leads. `config.py` is the single source of constants and credentials, and every other module imports it.
 
@@ -33,6 +34,7 @@ flowchart LR
   BSE --> CACHE
   NSE --> CACHE
   MED --> CACHE
+  SEBI[sebi_client.py] -- "orders (drill-down)" --> DD
   MAIN -- "events, placebo days, signal frames" --> ES
   ES -- "per-event metrics + tests" --> MAIN
   MAIN --> REP[report.py]
@@ -52,8 +54,8 @@ A run of `python main.py --universe nifty50` works like this:
    3. `earliest_exchange_time` moves a filing to its NSE broadcast time when NSE carried it first.
    4. `build_events` assigns Day 0 and merges same-day filings.
    5. `placebo_events` draws non-event days.
-   6. Optional signal frames (F&O, deals, intraday) are fetched and passed to `run_event_study`, which runs for both the events and the placebo days.
-   7. Media lead is added for unscheduled events when `media` is on.
+   6. Optional signal frames (F&O, deals, intraday, insider trades) and the stock's sector index are fetched and passed to `run_event_study`, which runs for both the events and the placebo days.
+   7. Media lead and broker actions are added for unscheduled events when `media` is on.
 
    A network failure skips that stock (after retries) instead of stopping the run.
 4. **Pooling.** Per-stock results are concatenated. `tests_table` runs `leakage_tests` for each group (all, non-overlapping, unscheduled, scheduled, media splits) and for the placebo days.
@@ -151,6 +153,12 @@ Per group, `leakage_tests` reports:
 - **The expiry cycle matters for OI.** Option OI builds through each monthly cycle; on placebo days the median 5-day change runs from −4% just after expiry to +32% 6–10 sessions in. Events and placebo days are spread across the cycle similarly, so the placebo comparison is fair. When reading a group's OI number, still check it against the cycle: scheduled events stayed +13% above placebo when matched on sessions-since-expiry.
 - **Upstox alternative:** `--oi-source upstox` uses expired near-month futures (Plus plan). It covers futures only and stops at the last expiry. Prefer NSE.
 
+**Drill-down data.** On top of the day table and contracts:
+
+- **1-minute profile** (`minute_profile`): for the top 3 contracts, from Upstox expired-instrument minute candles (`get_expired_option_contracts`, `get_expired_minutes`; Plus plan). It shows contracts per session, the share bought in the first 15 minutes of sessions (a gap reaction to overnight news) and in the last 60 trading minutes before the public time, and the busiest minutes.
+- **Insider trades** in [t-30, t-1], by category.
+- **SEBI orders** (`SebiClient.search_orders`): a title search on the company name and symbol. Titles about insider trading or leaked price-sensitive information are highlighted.
+
 **Drill-down (`option_flow_by_day`, `top_contracts`, `drilldown.py`).** For each lead it shows the news-side vs wrong-side OTM volume from t-10 to t+1, and the news-side contracts with the most pre-window volume against their own baseline. It also shows each contract's premium at t-1 vs Day 0 (did the buyers profit from the news?), plus filings and press. On the first 8 leads every winning trade had a public explanation (a broker upgrade, Venezuela news, a same-day media report). Treat leads as a screen, not as evidence.
 
 **Leads list (`rank_directional_otm`).** Unscheduled, non-overlapping events are kept when `news_side_otm_vol_z ≥ 1.96` and the news side exceeds the wrong side. They are ranked by the gap and written to `output/otm_leads_*.csv` and the report. Many leads are "Clarification sought" events, where the media report came before the filing; check the press timeline before treating a lead as insider trading.
@@ -178,6 +186,24 @@ Per group, `leakage_tests` reports:
 - **Limits:**
   - Historical items carry only a date, so same-day coverage can't be ordered against the filing.
   - **Google returns different result sets for the same query between runs** (9 items vs ~100 seen in testing), so "no prior media" is unreliable. That is why the signal is opt-in.
+
+### Insider trades (`measure_insider`, signal `insider`)
+
+- **Source:** SEBI PIT system-driven disclosures from BSE `sddpit/w` (`BSEScraper.get_insider_trades`). The endpoint was found in the BSE website's JS bundle. NSE's `corporates-pit` is not used: it returns zero rows for whole stocks (HDFCBANK, TCS), where BSE has about 1,500 a year.
+- **Privacy:** person names are dropped at fetch time; only category, side, shares, value and dates are kept.
+- **Metrics:** over `INSIDER_WINDOW` [t-30, t-1] by **trade date** (disclosures are filed a median ~6 days later), we compute `insider_any`, `insider_trades`, `insider_net_cr` (buy − sell value, ₹ crore) and `insider_net_signed_cr = direction · insider_net_cr`.
+- **Caveats:** insiders are barred from trading before results (trading-window closure), so expect fewer insider trades before scheduled events. ESOP-related buys count as buys.
+
+### Public-catalyst controls
+
+Most false leads come from public news that isn't a company filing. Four controls:
+
+- **Sector-adjusted drift.** `prepare_prices` adds `sec_ar` (stock minus sector index) when a sector index is given. Industries map to NSE sector indices in `config.SECTOR_INDEX`; banks override to Nifty Bank. `measure_event` then reports `sector_pre_car(_z)`, and `sector_signed_pre_car` uses the same news direction. The stock is part of its own index, so this slightly understates drift for the heaviest index weights.
+- **Macro and sector shocks.** `macro_shock` is a pre-window day with |Nifty return| ≥ 2%. `sector_shock` is a day with |sector − Nifty| ≥ 2%.
+- **Broker actions** (with `media`). `MediaClient.search_broker` searches Google News for rating and target news. `broker_action` flags titles that name the company (symbol, or first word of the name) and match `BROKER_PATTERN`: a rating upgrade or downgrade, a target hike or cut, or initiated coverage. Generic "check target price" explainers are excluded.
+- **Exchange clarifications.** "Media Clarification" events already imply an earlier media report.
+
+`tests_table` adds the group **"Unsched, no public catalyst"**: unscheduled, non-overlapping events with none of the above.
 
 ### Labels
 
@@ -220,7 +246,10 @@ Because direction comes from the reaction, every path rises after Day 0 by const
 | `nse_fo2_<date>` | F&O aggregates per symbol, kind, expiry and moneyness | session, shared by all symbols |
 | `nse_deals_*` | bulk and block deals | symbol and range |
 | `nifty50_<date>` | constituents | day |
-| `gnews_*` | Google News results | company and range |
+| `gnews_*`, `gnews_broker_*` | Google News press and broker-action results | company and range |
+| `bse_pit_<scrip>_*` | insider trades (no names) | scrip and range |
+| `upx_optc_*`, `upx_min_*` | Upstox expired option contracts and their 1-minute candles (drill-down) | underlying and expiry; contract and range |
+| `sebi_orders_*` | SEBI order search results | term and day |
 | `strikes/<SYM>_<date>.csv` | per-contract option rows (drill-down only) | symbol and session |
 
 Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggregation and can be deleted.
@@ -230,11 +259,12 @@ Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggre
 | File | Purpose |
 |---|---|
 | `config.py` | Loads `.env`. Defines every endpoint and header set, market-session times, window constants, signal parameters (placebo, F&O, deals, intraday, media), `EXTRA_SIGNAL_COLUMNS` (signal column → report label) and the `SAMPLE_STOCKS` override map. |
-| `upstox_client.py` | `UpstoxClient._get` (status check, 429 backoff, connection retry). Instrument master and lookups (`get_instrument_key`, `get_bse_scrip`). `get_daily_candles`, `get_intraday_month` / `get_intraday` (v3, 1-minute). Expired-futures helpers (`get_expired_futures_oi`, Plus plan). Raises `UpstoxError`. |
-| `news_scraper.py` | `BSEScraper`: paginated, cached fetch, snake_case normalisation, and `classify()`, which applies the `ROUTINE_*` deny-lists and the ordered `MATERIAL_RULES` (first match wins). |
+| `upstox_client.py` | `UpstoxClient._get` (status check, 429 backoff, connection retry). Instrument master and lookups (`get_instrument_key`, `get_bse_scrip`). `get_daily_candles`, `get_intraday_month` / `get_intraday` (v3, 1-minute). Expired-instrument helpers (Plus plan): `get_expired_futures_oi`, `get_expired_option_contracts`, `get_expired_minutes`. Raises `UpstoxError`. |
+| `news_scraper.py` | `BSEScraper`: paginated, cached fetch, snake_case normalisation, `get_insider_trades` (SEBI PIT, names dropped), and `classify()`, which applies the `ROUTINE_*` deny-lists and the ordered `MATERIAL_RULES` (first match wins). |
 | `nse_client.py` | `NSEClient`. `_get` retries dropped connections, and `_api_get` warms the Akamai cookies from the homepage before calling `/api` endpoints. Data methods: `get_nifty50`, `get_announcements`, `get_large_deals` (splits ranges at the 70-row cap and chunks to 365 days), and `get_fo_activity` / `get_futures_oi` (bhavcopy aggregates). Raises `NSEError`. |
-| `media_client.py` | `MediaClient.search` (Google News RSS, cached) and `company_query` (strips the "Ltd." suffix). Raises `MediaError`. |
-| `event_study.py` | Pure computation with no I/O apart from skip notices:<br>• **timing and events:** `assign_day0`, `earliest_exchange_time`, `build_events`, `placebo_events`;<br>• **metrics:** `measure_event`, `measure_fno`, `measure_deals`, `measure_intraday`, `media_lead` / `generic_words`, `add_direction_metrics`;<br>• **orchestration and tests:** `run_event_study`, `summarise` (single-stock summary), `leakage_tests`. |
+| `media_client.py` | `MediaClient.search` and `search_broker` (Google News RSS, cached) and `company_query` (strips the "Ltd." suffix). Raises `MediaError`. |
+| `sebi_client.py` | `SebiClient.search_orders`: SEBI Orders listing title search. It visits the listing first for the session, then pages the AJAX endpoint 25 rows at a time. Raises `SebiError`. |
+| `event_study.py` | Pure computation with no I/O apart from skip notices:<br>• **timing and events:** `assign_day0`, `earliest_exchange_time`, `build_events`, `placebo_events`;<br>• **metrics:** `measure_event`, `measure_fno`, `measure_deals`, `measure_intraday`, `measure_insider`, `media_lead` / `generic_words`, `broker_action`, `add_direction_metrics`;<br>• **drill-down:** `rank_directional_otm`, `option_flow_by_day`, `top_contracts`, `minute_profile`;<br>• **orchestration and tests:** `run_event_study`, `summarise` (single-stock summary), `leakage_tests`. |
 | `report.py` | `build(results, placebo, tests, meta)` returns the HTML report. |
 | `drilldown.py` | Drill-down CLI. For the leads in the latest `otm_leads_*.csv` (or `--symbol/--day0`) it fetches per-contract options (`NSEClient.get_option_strikes`), daily prices, BSE filings for ±10 days and Google News for the 10 days before. It renders `report.build_drilldown` to `output/drilldown_<date>.html` and writes `drilldown_contracts_<date>.csv`. |
 | `main.py` | The CLI: `resolve_universe`, `study_stock`, `tests_table`, terminal formatting, and the CSV and report writes. |
@@ -244,7 +274,9 @@ Old `nse_stf_*` and `nse_fo_*` files come from earlier versions of the F&O aggre
 - **The BSE API sits behind Akamai.** Plain `curl` gets "Access Denied". Python `requests` with the `config.BSE_HEADERS` browser User-Agent, Referer and Origin gets through.
 - **NSE `/api` endpoints need cookies** from a `www.nseindia.com` homepage hit first. `_api_get` handles this and re-warms once on a non-JSON response.
   - `/api/historical/bulk-deals` returns 503. `historicalOR/bulk-block-short-deals` (what the website calls) works, but truncates at 70 rows and returns a 500 for ranges over a year.
-- **SEBI PIT insider disclosures are not used.** NSE `/api/corporates-pit` returns zero rows all year for HDFCBANK and TCS, and nothing for INFY after April 2026, so its absence can't be read as "no insider trades". BSE has an `InsiderTrade15/w` endpoint, but its parameters are unknown. Capture the request from the BSE website in browser devtools to add it.
+- **Every exchange API is queried at most a year at a time.** BSE announcements return **zero rows, without an error**, for a longer range (found when the first 26-month run showed 0 filings for every stock). NSE deals return a 500. Every client chunks to ≤ 365 days.
+- **Insider trades come from BSE, not NSE.** NSE `/api/corporates-pit` returns zero rows all year for HDFCBANK and TCS. BSE `sddpit/w` (`scripcode`, `fromdt`/`todt` as YYYYMMDD) is complete. Its sibling `InsiderTrade15/w` returns nothing for current data.
+- **SEBI's order listing needs a session.** POSTs to `getnewslistinfo.jsp` return 530 unless the listing page was fetched first. The `search` field filters titles.
 - **Upstox daily candles need no token; intraday v3 and the expired-instrument endpoints do.** The expired endpoints also need the Plus plan (`UDAPI1149`). A token issued before a plan upgrade keeps the old entitlements, so regenerate it.
 - **Prices are not adjusted for corporate actions.** `measure_event` skips any event with a daily |return| > `PRICE_BREAK_THRESHOLD` (20%) in [t-35, t+5]; Tata Motors' Oct-2025 demerger exercises this. `TMPV` is Tata Motors after the demerger (BSE 500570 unchanged).
 - **SAST disclosures are routine, not M&A.** Reg 29(1)/29(2), 31 and 10(6) filings are a shareholder reporting its own stake change or pledge after the fact. Their titles contain "Substantial Acquisition of Shares", which used to match the M&A rule: 87 filings, 23 of the unscheduled events. They are now excluded by subcategory and by text pattern.

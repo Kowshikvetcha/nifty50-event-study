@@ -19,10 +19,23 @@ Events are compared against their own baselines and against random non-event day
 - **Signals:**
   - `fno`: futures and option OI build-up (call vs put, adjusted for monthly expiries), option volume, and short-dated out-of-the-money volume on the side that would profit from the news (NSE bhavcopy, free).
   - `deals`: bulk/block deals in the 30 sessions before (NSE).
+  - `insider`: SEBI PIT insider trades (promoters, directors, designated persons) in the 30 sessions before, by trade date, net value signed by the news direction (BSE system-driven disclosures).
   - `intraday`: for filings released during market hours, the abnormal return and volume in the hour before the filing minute (Upstox 1-minute candles).
-  - `media` (opt-in, experimental): whether matching press coverage appeared on a day before the filing (Google News RSS).
+  - `media` (opt-in, experimental): whether matching press coverage, or a broker rating or target change, appeared on a day before the filing (Google News RSS).
+- **Public-catalyst controls:**
+  - a sector-adjusted re-test of the price drift, using each stock's NSE sector index;
+  - flags for a big market day or a big sector day in the pre-window;
+  - the broker and press flags above.
+
+  The "Unsched, no public catalyst" group keeps only unscheduled news with none of these: the cleanest leakage test.
 - **Report:** a self-contained HTML report. It contains verdicts for unscheduled news, the average signed CAR path, drift by event type, the test tables, the strongest individual price moves, and a ranked list of directional option-flow **leads**. Per-event, placebo, test and lead CSVs are written alongside it.
-- **Drill-down** (`drilldown.py`): for each lead, the day-by-day option flow, the actual contracts bought with their Day-0 premium change (did the buyers profit?), the filings around the event and earlier press coverage.
+- **Drill-down** (`drilldown.py`): for each lead it shows:
+  - the day-by-day option flow;
+  - the actual contracts bought, with their Day-0 premium change (did the buyers profit?);
+  - **when** they were bought, minute by minute (Upstox expired-option data);
+  - reported insider trades before the event;
+  - SEBI enforcement orders mentioning the company;
+  - the filings around the event and earlier press coverage.
 
 ## Prerequisites
 
@@ -31,8 +44,9 @@ Events are compared against their own baselines and against random non-event day
   - `api.upstox.com` and `assets.upstox.com`;
   - `api.bseindia.com`;
   - `www.nseindia.com` and `nsearchives.nseindia.com`;
-  - `news.google.com` (only for `media`).
-- An Upstox access token for the `intraday` signal. Daily candles work without one. `--oi-source upstox` also needs the Upstox Plus plan.
+  - `news.google.com` (only for `media`);
+  - `www.sebi.gov.in` (only for the drill-down).
+- An Upstox access token for the `intraday` signal. Daily candles work without one. The Upstox Plus plan is needed for `--oi-source upstox` and for the drill-down's 1-minute option data.
 
 ## Installation
 
@@ -50,7 +64,7 @@ Credentials are read from `.env` in the project root by `config.py`. `.env` is g
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `UPSTOX_ACCESS_TOKEN` | For `intraday` and `--oi-source upstox` | Sent as a Bearer token on Upstox requests. Tokens expire daily (about 3:30 AM IST). Regenerate after a plan upgrade. |
+| `UPSTOX_ACCESS_TOKEN` | For `intraday`, `--oi-source upstox` and the drill-down's option minutes | Sent as a Bearer token on Upstox requests. Tokens expire daily (about 3:30 AM IST). Regenerate after a plan upgrade. |
 | `UPSTOX_API_KEY` / `UPSTOX_API_SECRET` | No | Used in the OAuth login flow to obtain a token; not used by any request |
 
 Study parameters (windows, baselines, placebo size, signal settings) are constants in [config.py](config.py).
@@ -62,7 +76,7 @@ Study parameters (windows, baselines, placebo size, signal settings) are constan
 .venv/Scripts/python main.py --symbol TMPV                    # Tata Motors (exercises the price-break skip)
 .venv/Scripts/python main.py --universe nifty50               # all Nifty 50, pooled tests + report
 .venv/Scripts/python main.py --universe TCS,INFY,HCLTECH      # any list of NSE symbols
-.venv/Scripts/python main.py --universe nifty50 --signals fno,deals,intraday,media
+.venv/Scripts/python main.py --universe nifty50 --months 26 --signals fno,deals,intraday,insider,media  # full study (Aug 2024 on)
 .venv/Scripts/python drilldown.py                            # drill into the top 8 option-flow leads
 .venv/Scripts/python drilldown.py --symbol ONGC --day0 2026-01-06   # any single event
 ```
@@ -72,8 +86,8 @@ Study parameters (windows, baselines, placebo size, signal settings) are constan
 | `--symbol` | `RELIANCE` | Single-stock run (prints the per-event table) |
 | `--universe` | – | `nifty50` or comma-separated NSE symbols; pools all events |
 | `--scrip` | ISIN lookup | BSE scrip override for a single-stock run |
-| `--months` | `12` | Look-back period for announcements |
-| `--signals` | `fno,deals,intraday` | Any of `fno`, `deals`, `intraday`, `media`, or `none` |
+| `--months` | `12` | Look-back period for announcements. The F&O data format starts in July 2024, so `26` is the longest useful value. |
+| `--signals` | `fno,deals,intraday,insider` | Any of `fno`, `deals`, `intraday`, `insider`, `media`, or `none` |
 | `--oi` | off | Shorthand for adding `fno` |
 | `--oi-source` | `nse` | `nse` (bhavcopy, includes options) or `upstox` (expired near-month futures only) |
 
@@ -104,6 +118,9 @@ On Windows, prefix commands with `PYTHONIOENCODING=utf-8` when running from bash
 | Signed call vol skew z | Call share of option volume, signed by the news direction |
 | *(positioning p-values)* | All against placebo days, not against zero |
 | Intraday pre-AR z / pre-vol z | The hour before in-session filings, against the same clock window on the prior 20 sessions |
+| Insider trade share / Insider net, news-signed | Share of events with a reported insider trade in the 30 sessions before, and insiders' net buying signed by the news direction (> 0 = insiders traded the right way) |
+| Sector-adj signed pre CAR | The same price-drift test against the stock's sector index, so sector news doesn't count as leakage |
+| Unsched, no public catalyst row | Unscheduled news with no big market or sector day in the pre-window, no exchange query about a media report, and (with `media`) no earlier press or broker call |
 | Placebo days row | The null: signed pre-CAR should be about 0 and Right way about 50% |
 | Verdict tiles (report) | Unscheduled news only. Scheduled results are pre-announced, so positioning before them is expected. |
 
@@ -112,7 +129,7 @@ The single-stock run also prints the original per-event table: Day 0, session, P
 ## Limitations
 
 - **Leads are not findings.** On the first 8 leads, every trade that profited had a public explanation (a broker upgrade, macro news, a same-day media report).
-- **No SEBI insider-trade (PIT) disclosures.** NSE's feed is incomplete, and the BSE endpoint isn't wired up yet.
+- **Insider trades are as reported.** BSE's PIT feed is used because NSE's is incomplete. ESOP-related buys count as buys.
 - **Media timing is day-level and unstable.** Free news feeds give no minute timestamps, and Google results vary between runs.
 - **Coverage and bias:**
   - Prices are unadjusted; events near splits or demergers are skipped.
@@ -133,7 +150,8 @@ config.py          credentials, endpoints, study constants
 upstox_client.py   instrument master, daily + 1-minute candles, expired-futures OI
 news_scraper.py    BSE announcements fetch + material-event classifier
 nse_client.py      Nifty 50 list, NSE announcements, F&O bhavcopy aggregates, bulk/block deals
-media_client.py    Google News RSS search (optional media signal)
+media_client.py    Google News RSS search (press and broker actions, optional)
+sebi_client.py     SEBI enforcement-order search (drill-down)
 event_study.py     Day-0 alignment, metrics, signals, placebo, leakage tests (pure)
 report.py          HTML report and drill-down page (pure rendering)
 drilldown.py       per-event drill-down CLI for option-flow leads

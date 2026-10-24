@@ -162,6 +162,33 @@ class UpstoxClient:
             {"instrument_key": underlying_key, "expiry_date": expiry_date},
         )
 
+    def get_expired_option_contracts(self, underlying_key: str, expiry: str) -> pd.DataFrame:
+        """Expired option contracts (instrument_key, strike_price, instrument_type, lot_size) for one expiry."""
+        cache_file = config.CACHE_DIR / f"upx_optc_{underlying_key.replace('|', '_')}_{expiry}.csv"
+        if cache_file.exists():
+            return pd.read_csv(cache_file)
+        rows = self._get(config.UPSTOX_BASE_URL + "/expired-instruments/option/contract",
+                         {"instrument_key": underlying_key, "expiry_date": expiry})
+        df = pd.DataFrame(rows)[["instrument_key", "strike_price", "instrument_type", "lot_size", "expiry"]]
+        df.to_csv(cache_file, index=False)
+        return df
+
+    def get_expired_minutes(self, instrument_key: str, from_date: date, to_date: date) -> pd.DataFrame:
+        """1-minute candles of an expired contract (index = bar start, naive IST; volume in shares). Plus plan."""
+        cache_file = config.CACHE_DIR / (
+            f"upx_min_{instrument_key.replace('|', '_').replace(' ', '')}_{from_date}_{to_date}.csv")
+        if cache_file.exists():
+            return pd.read_csv(cache_file, index_col="ts", parse_dates=True)
+        url = config.UPSTOX_EXPIRED_CANDLE_URL.format(key=quote(instrument_key, safe=""), interval="1minute",
+                                                      to_date=to_date.isoformat(), from_date=from_date.isoformat())
+        candles = self._get(url).get("candles", [])
+        time.sleep(config.UPSTOX_REQUEST_PAUSE_SEC)
+        df = pd.DataFrame(candles, columns=_CANDLE_COLUMNS[: len(candles[0])] if candles else _CANDLE_COLUMNS)
+        df["ts"] = pd.to_datetime(df["timestamp"].str[:19]) if len(df) else pd.Series(dtype="datetime64[ns]")
+        df = df.drop(columns="timestamp").set_index("ts").sort_index()
+        df.to_csv(cache_file, index_label="ts")
+        return df
+
     def get_expired_futures_oi(self, underlying_key: str, from_date: date, to_date: date) -> pd.DataFrame:
         """Stitch near-month expired FUTSTK daily candles into a continuous OI series.
 
